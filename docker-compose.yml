@@ -1,0 +1,53 @@
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: visionbot-mqtt
+    restart: unless-stopped
+    ports:
+      - "1884:1883"
+    volumes:
+      - ./broker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+
+  backend:
+    build:
+      context: ./backend
+    container_name: visionbot-backend
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+    ports:
+      - "8000:8000"
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MQTT_BASE_TOPIC: visionbot
+      COMMAND_ACK_TIMEOUT_S: "3.0"
+      AI_DEVICE: cpu
+      AI_ENABLE_YOLO: "1"
+      AI_YOLO_MODEL: yolo11n.onnx
+      AI_YOLO_IMGSZ: "320"
+      AI_CONF_THRESHOLD: "0.25"
+      AI_DETECT_INTERVAL_S: "0.20"
+      AI_ENABLE_VLM: "0"
+      AI_MODEL_DIR: /app/models
+    volumes:
+      - ai_models:/app/models
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: visionbot-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  mqtt_data:
+  mqtt_log:
+  ai_models:

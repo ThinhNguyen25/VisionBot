@@ -1,6 +1,5 @@
 import json
 import os
-import ssl
 import threading
 import time
 from io import BytesIO
@@ -17,13 +16,12 @@ import paho.mqtt.client as mqtt
 import websocket
 
 
-APP_VERSION = "1.1.6-stable-ai-stream-fix"
+APP_VERSION = "1.2.0-local-lan-compose"
 
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "backend")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
-MQTT_CA_FILE = os.getenv("MQTT_CA_FILE", "../broker/certs/ca.crt")
 BASE_TOPIC = os.getenv("MQTT_BASE_TOPIC", "visionbot")
 COMMAND_ACK_TIMEOUT_S = float(os.getenv("COMMAND_ACK_TIMEOUT_S", "3.0"))
 COMMAND_ACK_OK_STATUSES = {"accepted", "executed", "ok"}
@@ -43,14 +41,13 @@ DETECTOR_PRESETS = [
     # Keep this list intentionally small and stable. Heavy/non-realtime models caused
     # stream lag and confusing benchmark numbers on CPU-only laptops.
     {"id": "yolo11n.onnx", "label": "ONNX — YOLO11n realtime", "family": "yolo", "speed": "realtime", "recommended_imgsz": 320, "note": "khuyến nghị: nhanh nhất, ổn nhất cho realtime CPU"},
-    {"id": "yolo11n.onnx", "label": "ONNX — YOLO11n cân bằng", "family": "yolo", "speed": "balanced", "recommended_imgsz": 416, "note": "ảnh rõ hơn chút, chậm hơn 320"},
+    {"id": "yolo11n.onnx", "label": "ONNX — YOLO11n cân bằng", "family": "yolo", "speed": "balanced", "recommended_imgsz": 320, "note": "giữ 320 vì yolo11n.onnx export cố định input 320"},
     {"id": "yolov8n.onnx", "label": "ONNX — YOLOv8n fallback", "family": "yolo", "speed": "fallback", "recommended_imgsz": 416, "note": "fallback nhẹ nếu YOLO11n lỗi"},
     {"id": "torchvision:ssdlite320_mobilenet_v3_large", "label": "SSD MobileNetV3 320 — không YOLO", "family": "ssd_mobilenet", "speed": "fast", "recommended_imgsz": 320, "note": "detector deep-learning khác YOLO, bbox COCO, CPU"},
 ]
 VLM_PRESETS = [
     {"id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "label": "SmolVLM2 500M — nhẹ nhất", "params": "0.5B", "bbox": "không trực tiếp"},
     {"id": "HuggingFaceTB/SmolVLM-500M-Instruct", "label": "SmolVLM 500M — ổn định", "params": "0.5B", "bbox": "không trực tiếp"},
-    {"id": "microsoft/Florence-2-base", "label": "Florence-2 base — VLM có OD/grounding", "params": "~0.23B", "bbox": "có qua prompt <OD>"},
 ]
 
 
@@ -254,7 +251,7 @@ def publish_mqtt_or_503(topic: str, payload: dict[str, Any], qos: int = 1, timeo
             status_code=503,
             detail={
                 "error": "mqtt_not_connected",
-                "message": "Backend is not connected to the MQTTS broker, so the command was not sent.",
+                "message": "Backend is not connected to the MQTT broker, so the command was not sent.",
                 "mqtt_connected_flag": mqtt_connected,
                 "mqtt_client_connected": mqtt_client.is_connected(),
             },
@@ -379,6 +376,16 @@ def upsert_robot(device_id: str, data: dict[str, Any], kind: str) -> None:
     elif kind == "telemetry":
         r["telemetry"] = data
         r["online"] = True
+        network = data.get("network") if isinstance(data.get("network"), dict) else {}
+        camera = data.get("camera") if isinstance(data.get("camera"), dict) else {}
+        if "ip" in network:
+            r["ip"] = network["ip"]
+        if "stream_url" in camera:
+            r["stream_url"] = camera["stream_url"]
+        if "ready" in camera:
+            r["camera_ready"] = camera["ready"]
+        if "mqtt_connected" in network:
+            r["mqtt_connected"] = network["mqtt_connected"]
     elif kind == "event":
         r["events"].append(data)
         r["events"] = r["events"][-100:]
@@ -422,9 +429,8 @@ def on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
 
 
 mqtt_client = mqtt.Client(client_id="visionbot-backend", protocol=mqtt.MQTTv5)
-mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-mqtt_client.tls_set(ca_certs=MQTT_CA_FILE, certfile=None, keyfile=None, cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
-mqtt_client.tls_insecure_set(False)
+if MQTT_USERNAME:
+    mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 mqtt_client.on_connect = on_connect
 mqtt_client.on_disconnect = on_disconnect
 mqtt_client.on_message = on_message
@@ -1047,7 +1053,7 @@ class VisionAI:
             "vlm_presets": VLM_PRESETS,
             "quick_profiles": {
                 "realtime": {"yolo_model": "yolo11n.onnx", "yolo_imgsz": 320, "conf_threshold": 0.25, "detect_interval_s": 0.20},
-                "balanced": {"yolo_model": "yolo11n.onnx", "yolo_imgsz": 416, "conf_threshold": 0.25, "detect_interval_s": 0.30},
+                "balanced": {"yolo_model": "yolo11n.onnx", "yolo_imgsz": 320, "conf_threshold": 0.25, "detect_interval_s": 0.30},
                 "strong": {"yolo_model": "yolo11s.onnx", "yolo_imgsz": 512, "conf_threshold": 0.25, "detect_interval_s": 0.50},
                 "mobilenet": {"yolo_model": "torchvision:ssdlite320_mobilenet_v3_large", "yolo_imgsz": 320, "conf_threshold": 0.30, "detect_interval_s": 0.50},
                 "fasterrcnn": {"yolo_model": "torchvision:fasterrcnn_mobilenet_v3_large_320_fpn", "yolo_imgsz": 320, "conf_threshold": 0.35, "detect_interval_s": 1.00},

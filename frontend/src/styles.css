@@ -27,7 +27,7 @@ input:focus { border-color: var(--blue); box-shadow: 0 0 0 4px rgba(36,107,254,.
 .app { width: min(1440px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 40px; }
 .hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; padding: 30px 4px 20px; }
 .eyebrow { color: var(--violet); display: flex; align-items: center; gap: 8px; font-weight: 900; letter-spacing: .02em; }
-h1 { font-size: clamp(34px, 5vw, 60px); line-height: .95; margin: 12px 0; letter-spacing: -0.05em; }
+h1 { font-size: clamp(34px, 5vw, 60px); line-height: .95; margin: 12px 0; letter-spacing: 0; }
 p { color: var(--muted); }
 .statusBox { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .pill { padding: 9px 12px; border-radius: 999px; font-size: 13px; font-weight: 900; background: white; border: 1px solid var(--line); }
@@ -39,7 +39,11 @@ p { color: var(--muted); }
 .helpStrip { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 18px; color: var(--muted); }
 .helpStrip div { display: flex; gap: 8px; align-items: center; color: var(--text); }
 .helpStrip span { background: #f3f6ff; border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; font-size: 13px; }
-.grid { display: grid; grid-template-columns: 1.35fr .85fr; gap: 18px; align-items: start; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(360px, .85fr); gap: 18px; align-items: start; }
+.leftStack { display: grid; gap: 18px; align-content: start; min-width: 0; }
+.sideStack { display: grid; gap: 18px; align-content: start; min-width: 0; }
+.leftStack .card,
+.sideStack .card { min-width: 0; }
 .cardTitle { font-size: 18px; font-weight: 950; display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .cardTitle.small { font-size: 15px; margin: 18px 0 10px; }
 .videoCard { min-height: 520px; }
@@ -83,7 +87,7 @@ summary { cursor: pointer; color: var(--blue); font-weight: 800; }
 .logList::-webkit-scrollbar, .chatBox::-webkit-scrollbar, pre::-webkit-scrollbar { width: 10px; height: 10px; }
 .logList::-webkit-scrollbar-thumb, .chatBox::-webkit-scrollbar-thumb, pre::-webkit-scrollbar-thumb { background: #c8d6f5; border-radius: 999px; }
 .logList::-webkit-scrollbar-track, .chatBox::-webkit-scrollbar-track, pre::-webkit-scrollbar-track { background: #eef4ff; border-radius: 999px; }
-@media (max-width: 960px) { .hero { display: block; } .statusBox { justify-content: flex-start; } .grid { grid-template-columns: 1fr; } .config input { min-width: 100%; } .pad button { width: 118px; } }
+@media (max-width: 960px) { .hero { display: block; } .statusBox { justify-content: flex-start; } .grid { grid-template-columns: 1fr; } .sideStack { gap: 18px; } .config input { min-width: 100%; } .pad button { width: 118px; } }
 .softDanger { background: #fff7ed; color: #c2410c; border: 1px solid rgba(194,65,12,.18); }
 .statsRow { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
 .statChip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: #f8fbff; color: var(--muted); border-radius: 999px; padding: 7px 10px; font-size: 12px; font-weight: 800; }

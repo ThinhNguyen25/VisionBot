@@ -8,10 +8,9 @@ set -a
 [ -f .env ] && source .env
 set +a
 export MQTT_HOST="${MQTT_HOST:-localhost}"
-export MQTT_PORT="${MQTT_PORT:-8883}"
-export MQTT_USERNAME="${MQTT_USERNAME:-backend}"
-export MQTT_PASSWORD="${MQTT_PASSWORD:-backend-pass-123}"
-export MQTT_CA_FILE="${MQTT_CA_FILE:-../broker/certs/ca.crt}"
+export MQTT_PORT="${MQTT_PORT:-1883}"
+export MQTT_USERNAME="${MQTT_USERNAME:-}"
+export MQTT_PASSWORD="${MQTT_PASSWORD:-}"
 export COMMAND_ACK_TIMEOUT_S="${COMMAND_ACK_TIMEOUT_S:-3.0}"
 export AI_DEVICE="cpu"
 export AI_ENABLE_YOLO="${AI_ENABLE_YOLO:-1}"

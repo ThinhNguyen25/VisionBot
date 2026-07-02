@@ -19,10 +19,9 @@ PY
 fi
 
 export MQTT_HOST="${MQTT_HOST:-localhost}"
-export MQTT_PORT="${MQTT_PORT:-8883}"
-export MQTT_USERNAME="${MQTT_USERNAME:-backend}"
-export MQTT_PASSWORD="${MQTT_PASSWORD:-backend-pass-123}"
-export MQTT_CA_FILE="${MQTT_CA_FILE:-../broker/certs/ca.crt}"
+export MQTT_PORT="${MQTT_PORT:-1883}"
+export MQTT_USERNAME="${MQTT_USERNAME:-}"
+export MQTT_PASSWORD="${MQTT_PASSWORD:-}"
 export MQTT_BASE_TOPIC="${MQTT_BASE_TOPIC:-visionbot}"
 export COMMAND_ACK_TIMEOUT_S="${COMMAND_ACK_TIMEOUT_S:-3.0}"
 

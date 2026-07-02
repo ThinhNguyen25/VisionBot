@@ -4,12 +4,11 @@
   Features:
     - Config portal displays device_id
     - No hard-coded Wi-Fi credentials
-    - MQTTS control/status/telemetry
+    - MQTT control/status/telemetry
     - WebSocket camera stream on port 86
     - Dynamic IP announce via MQTT state
     - Motor watchdog / command TTL
     - State + telemetry + basic security events
-    - Strict TLS verification for MQTTS: no insecure TLS mode
 
   Hardware mapping inherited from current tested baseline:
     L298N IN1 -> GPIO12
@@ -25,15 +24,17 @@
     - ArduinoJson by Benoit Blanchon
     - esp32-camera / ESP32 board package
 
-  Security note:
-    This production firmware uses MQTTS with broker certificate verification only.
-    The broker Root CA is entered once in the setup portal and stored in NVS.
-    If the CA is missing or invalid, MQTT will not connect.
+  Demo note:
+    This build targets a portable LAN demo. Set Windows Mobile Hotspot to:
+      SSID: VisionBot-LAN
+      Password: visionbot123
+    Windows hotspot normally gives the laptop IP 192.168.137.1.
+    ESP uses external MQTT port 1884, mapped by Docker to broker port 1883.
 */
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <PubSubClient.h>
@@ -54,11 +55,16 @@
 
 // ================= FIRMWARE =================
 #define FW_NAME    "visionbot-esp32cam"
-#define FW_VERSION "1.0.5-xclk15-cmd-ack-tls-debug"
+#define FW_VERSION "1.2.1-compose-hotspot-port1884"
 
-// ================= MQTT TLS CA =================
-// Production mode: Root CA is configured from the setup portal and stored in NVS.
-// No broker certificate is hard-coded in this firmware.
+// ================= PORTABLE LAN DEMO DEFAULTS =================
+// Set Windows Mobile Hotspot to these exact values for a no-portal demo.
+// If the hotspot is unavailable, firmware falls back to the WiFiManager portal.
+#define VISIONBOT_DEMO_WIFI_ENABLE 1
+#define VISIONBOT_DEMO_WIFI_SSID "VisionBot-LAN"
+#define VISIONBOT_DEMO_WIFI_PASS "visionbot123"
+#define VISIONBOT_DEMO_MQTT_HOST "192.168.137.1"
+#define VISIONBOT_DEMO_MQTT_PORT 1884
 
 // ================= CAMERA MODEL: AI THINKER =================
 #define PWDN_GPIO_NUM     32
@@ -96,8 +102,8 @@
 WebServer httpServer(80);
 WebSocketsServer cameraWs = WebSocketsServer(86);
 Preferences prefs;
-WiFiClientSecure secureClient;
-PubSubClient mqttClient(secureClient);
+WiFiClient mqttNetClient;
+PubSubClient mqttClient(mqttNetClient);
 
 // ================= DEVICE CONFIG =================
 struct DeviceConfig {
@@ -107,7 +113,6 @@ struct DeviceConfig {
   uint16_t mqttPort;
   String mqttUser;
   String mqttPass;
-  String mqttCa;
   uint32_t telemetryIntervalMs;
 };
 
@@ -129,7 +134,6 @@ const int CAMERA_JPEG_QUALITY_PSRAM = 22;    // Higher number = smaller/lower qu
 const int CAMERA_JPEG_QUALITY_NO_PSRAM = 26;
 
 bool mqttEverConnected = false;
-bool mqttTlsReady = false;
 unsigned long lastMqttAttemptMs = 0;
 unsigned long mqttReconnectDelayMs = 1000;
 const unsigned long MQTT_RECONNECT_MAX_MS = 8000;
@@ -240,19 +244,6 @@ String getStreamUrl() {
 
 String mqttTopic(const String &suffix) {
   return cfg.baseTopic + "/" + deviceId + "/" + suffix;
-}
-
-String normalizePem(String pem) {
-  pem.trim();
-  pem.replace("\\n", "\n");
-  pem.replace("\\r", "");
-  return pem;
-}
-
-bool hasValidCaCert(const String &ca) {
-  return ca.indexOf("-----BEGIN CERTIFICATE-----") >= 0 &&
-         ca.indexOf("-----END CERTIFICATE-----") >= 0 &&
-         ca.length() > 500;
 }
 
 long currentUnixTs() {
@@ -445,13 +436,20 @@ void loadDeviceConfig() {
 
   cfg.baseTopic = prefs.getString("base_topic", "visionbot");
   cfg.mqttHost = prefs.getString("mqtt_host", "");
-  cfg.mqttPort = prefs.getUShort("mqtt_port", 8883);
+  cfg.mqttPort = prefs.getUShort("mqtt_port", 1883);
   cfg.mqttUser = prefs.getString("mqtt_user", "");
   cfg.mqttPass = prefs.getString("mqtt_pass", "");
-  cfg.mqttCa = normalizePem(prefs.getString("mqtt_ca", ""));
   cfg.telemetryIntervalMs = prefs.getUInt("telemetry_ms", 5000);
 
   prefs.end();
+
+#if VISIONBOT_DEMO_WIFI_ENABLE
+  cfg.baseTopic = "visionbot";
+  cfg.mqttHost = VISIONBOT_DEMO_MQTT_HOST;
+  cfg.mqttPort = VISIONBOT_DEMO_MQTT_PORT;
+  cfg.mqttUser = "";
+  cfg.mqttPass = "";
+#endif
 
   cfg.telemetryIntervalMs = constrain(cfg.telemetryIntervalMs, 1000UL, 60000UL);
 }
@@ -463,7 +461,6 @@ void saveDeviceConfig(
   const char *mqttPort,
   const char *mqttUser,
   const char *mqttPass,
-  const char *mqttCa,
   const char *telemetryMs
 ) {
   prefs.begin("visionbot", false);
@@ -474,7 +471,6 @@ void saveDeviceConfig(
   prefs.putUShort("mqtt_port", (uint16_t)atoi(mqttPort));
   prefs.putString("mqtt_user", String(mqttUser));
   prefs.putString("mqtt_pass", String(mqttPass));
-  prefs.putString("mqtt_ca", normalizePem(String(mqttCa)));
   prefs.putUInt("telemetry_ms", (uint32_t)atol(telemetryMs));
 
   prefs.end();
@@ -523,7 +519,6 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
   char mqttPortBuf[8];
   char mqttUserBuf[80];
   char mqttPassBuf[80];
-  static char mqttCaBuf[4096];
   char telemetryMsBuf[12];
 
   strlcpy(robotIdBuf, cfg.robotId.c_str(), sizeof(robotIdBuf));
@@ -532,7 +527,6 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
   snprintf(mqttPortBuf, sizeof(mqttPortBuf), "%u", cfg.mqttPort);
   strlcpy(mqttUserBuf, cfg.mqttUser.c_str(), sizeof(mqttUserBuf));
   strlcpy(mqttPassBuf, cfg.mqttPass.c_str(), sizeof(mqttPassBuf));
-  strlcpy(mqttCaBuf, cfg.mqttCa.c_str(), sizeof(mqttCaBuf));
   snprintf(telemetryMsBuf, sizeof(telemetryMsBuf), "%lu", (unsigned long)cfg.telemetryIntervalMs);
 
   String deviceHtml =
@@ -543,19 +537,17 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
     "Firmware: <b>" + String(FW_VERSION) + "</b><br>"
     "Reason: <b>" + reason + "</b><br>"
     "Camera stream after Wi-Fi: <b>ws://&lt;device_ip&gt;:86/</b><br>"
-    "Security: <b>MQTTS strict certificate verification</b><br>"
-    "MQTT Root CA: paste PEM as one line with <code>\\n</code> between lines.<br>"
-    "If laptop Wi-Fi changes, update <b>MQTTS broker host/IP</b> to the laptop Wi-Fi IPv4 address."
+    "MQTT: <b>plain MQTT external port 1884 for Docker Compose LAN demo</b><br>"
+    "Default hotspot mode uses MQTT host <b>192.168.137.1</b>."
     "</div>";
 
   WiFiManagerParameter pDevice(deviceHtml.c_str());
   WiFiManagerParameter pRobotId("robot_id", "Robot ID / friendly name", robotIdBuf, sizeof(robotIdBuf));
   WiFiManagerParameter pBaseTopic("base_topic", "MQTT base topic", baseTopicBuf, sizeof(baseTopicBuf));
-  WiFiManagerParameter pMqttHost("mqtt_host", "MQTTS broker host/IP", mqttHostBuf, sizeof(mqttHostBuf));
-  WiFiManagerParameter pMqttPort("mqtt_port", "MQTTS broker port", mqttPortBuf, sizeof(mqttPortBuf));
+  WiFiManagerParameter pMqttHost("mqtt_host", "MQTT broker host/IP", mqttHostBuf, sizeof(mqttHostBuf));
+  WiFiManagerParameter pMqttPort("mqtt_port", "MQTT broker port", mqttPortBuf, sizeof(mqttPortBuf));
   WiFiManagerParameter pMqttUser("mqtt_user", "MQTT username", mqttUserBuf, sizeof(mqttUserBuf));
   WiFiManagerParameter pMqttPass("mqtt_pass", "MQTT password", mqttPassBuf, sizeof(mqttPassBuf), "type='password'");
-  WiFiManagerParameter pMqttCa("mqtt_ca", "MQTT Root CA PEM, use \\n between lines", mqttCaBuf, sizeof(mqttCaBuf));
   WiFiManagerParameter pTelemetryMs("telemetry_ms", "Telemetry interval ms", telemetryMsBuf, sizeof(telemetryMsBuf));
 
   WiFiManager wm;
@@ -572,11 +564,10 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
   wm.addParameter(&pMqttPort);
   wm.addParameter(&pMqttUser);
   wm.addParameter(&pMqttPass);
-  wm.addParameter(&pMqttCa);
   wm.addParameter(&pTelemetryMs);
 
   Serial.println();
-  Serial.println("=== Wi-Fi / MQTTS setup portal ===");
+  Serial.println("=== Wi-Fi / MQTT setup portal ===");
   Serial.print("Reason: ");
   Serial.println(reason);
   Serial.print("Mode: ");
@@ -615,7 +606,6 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
     pMqttPort.getValue(),
     pMqttUser.getValue(),
     pMqttPass.getValue(),
-    pMqttCa.getValue(),
     pTelemetryMs.getValue()
   );
 
@@ -630,7 +620,7 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
   Serial.println(WiFi.localIP());
 
   if (forcePortal) {
-    Serial.println("Config portal finished. Restarting to reload Wi-Fi/MQTTS/TLS cleanly...");
+    Serial.println("Config portal finished. Restarting to reload Wi-Fi/MQTT cleanly...");
     delay(1000);
     ESP.restart();
   }
@@ -638,10 +628,49 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
   return true;
 }
 
+bool connectDemoHotspot() {
+#if VISIONBOT_DEMO_WIFI_ENABLE
+  Serial.println();
+  Serial.println("=== Portable LAN demo Wi-Fi ===");
+  Serial.print("Trying SSID: ");
+  Serial.println(VISIONBOT_DEMO_WIFI_SSID);
+  Serial.print("MQTT broker default: ");
+  Serial.print(VISIONBOT_DEMO_MQTT_HOST);
+  Serial.print(":");
+  Serial.println(VISIONBOT_DEMO_MQTT_PORT);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(VISIONBOT_DEMO_WIFI_SSID, VISIONBOT_DEMO_WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    loadDeviceConfig();
+    Serial.println("Demo hotspot connected.");
+    Serial.println("Wi-Fi sleep disabled for lower camera-stream latency.");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+
+  Serial.println("Demo hotspot not found. Falling back to setup portal.");
+#endif
+  return false;
+}
+
 bool startConfigPortalIfNeeded() {
   String recoveryReason = getRecoveryPortalReason();
   if (recoveryReason.length() > 0) {
     return runConfigPortal(true, recoveryReason);
+  }
+  if (connectDemoHotspot()) {
+    return true;
   }
   return runConfigPortal(false, "boot");
 }
@@ -855,7 +884,7 @@ String makeStatePayload(bool online) {
   p += "\"min_free_heap_bytes\":" + String(ESP.getMinFreeHeap()) + ",";
   p += "\"free_psram_bytes\":" + String(ESP.getFreePsram()) + ",";
   p += "\"reset_reason\":" + q(resetReasonToString()) + ",";
-  p += "\"tls_verified\":" + boolStr(mqttTlsReady) + ",";
+  p += "\"mqtt_plain\":" + boolStr(true) + ",";
   p += "\"last_security_event\":" + q(lastSecurityEvent);
   p += "}";
   return p;
@@ -903,7 +932,7 @@ String makeTelemetryPayload() {
   p += "\"reset_reason\":" + q(resetReasonToString());
   p += "},";
   p += "\"security\":{";
-  p += "\"tls_verified\":" + boolStr(mqttTlsReady) + ",";
+  p += "\"mqtt_plain\":" + boolStr(true) + ",";
   p += "\"event_count\":" + String(securityEventCount) + ",";
   p += "\"last_event\":" + q(lastSecurityEvent);
   p += "}";
@@ -1154,41 +1183,8 @@ void mqttCallback(char *topicChars, byte *payloadBytes, unsigned int length) {
   }
 }
 
-void setupTlsClient() {
-  mqttTlsReady = false;
-
-  cfg.mqttCa = normalizePem(cfg.mqttCa);
-
-  if (!hasValidCaCert(cfg.mqttCa)) {
-    Serial.println("FATAL: MQTT Root CA is missing or invalid.");
-    Serial.println("MQTTS will NOT connect. Open config portal and enter broker Root CA PEM.");
-    lastSecurityEvent = "tls_ca_missing";
-    return;
-  }
-
-  secureClient.setCACert(cfg.mqttCa.c_str());
-  mqttTlsReady = true;
-  Serial.println("MQTTS TLS mode: STRICT CERTIFICATE VERIFY.");
-}
-
-void syncTimeForTls() {
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
-
-  Serial.print("NTP sync");
-  unsigned long start = millis();
-
-  while (millis() - start < 8000) {
-    time_t now;
-    time(&now);
-    if (now > 1700000000) {
-      Serial.println(" OK.");
-      return;
-    }
-    Serial.print(".");
-    delay(500);
-  }
-
-  Serial.println(" timeout. TLS verification may fail if enabled.");
+void setupMqttClient() {
+  Serial.println("MQTT mode: plain TCP external port 1884 for Docker Compose LAN demo.");
 }
 
 void mqttSubscribeCommands() {
@@ -1225,12 +1221,7 @@ bool probeMqttTcpPort() {
 
 bool connectMqtt() {
   if (cfg.mqttHost.length() == 0) {
-    Serial.println("MQTTS broker is not configured.");
-    return false;
-  }
-
-  if (!mqttTlsReady) {
-    Serial.println("MQTTS blocked: broker Root CA is not configured/valid.");
+    Serial.println("MQTT broker is not configured.");
     return false;
   }
 
@@ -1248,7 +1239,7 @@ bool connectMqtt() {
   String stateTopic = mqttTopic("state");
   String willPayload = makeStatePayload(false);
 
-  Serial.print("Connecting MQTTS ");
+  Serial.print("Connecting MQTT ");
   Serial.print(cfg.mqttHost);
   Serial.print(":");
   Serial.print(cfg.mqttPort);
@@ -1295,7 +1286,7 @@ bool connectMqtt() {
   publishTelemetry();
   publishSecurityEvent("mqtt_connected", "connected and commands subscribed");
 
-  Serial.println("MQTTS connected.");
+  Serial.println("MQTT connected.");
   Serial.println("Subscribed topics:");
   Serial.println("  " + mqttTopic("cmd/drive"));
   Serial.println("  " + mqttTopic("cmd/servo"));
@@ -1422,7 +1413,7 @@ void setupHttpServer() {
   httpServer.on("/api/state", HTTP_GET, handleState);
 
   // Emergency stop is intentionally kept as a local HTTP endpoint.
-  // Normal control must use MQTTS.
+  // Normal control should use MQTT through the backend.
   httpServer.on("/api/stop", HTTP_POST, handleStop);
 
   // Reset requires token shown in Serial Monitor as setup AP password.
@@ -1485,7 +1476,7 @@ void setupPins() {
 void printBootInfo() {
   Serial.println();
   Serial.println("======================================");
-  Serial.println(" VisionBot ESP32-CAM Firmware v1.0.5 XCLK15 TLS Debug");
+  Serial.println(" VisionBot ESP32-CAM Firmware v1.2.1 Compose Hotspot Port 1884");
   Serial.println("======================================");
   Serial.print("Device ID: ");
   Serial.println(deviceId);
@@ -1516,8 +1507,6 @@ void setup() {
   bool wifiOk = startConfigPortalIfNeeded();
   if (!wifiOk) return;
 
-  syncTimeForTls();
-
   cameraReady = initCamera();
 
   cameraWs.begin();
@@ -1527,7 +1516,7 @@ void setup() {
 
   setupHttpServer();
 
-  setupTlsClient();
+  setupMqttClient();
   if (!connectMqtt()) {
     recordMqttFailureAndMaybeOpenPortal();
   }

@@ -4,14 +4,14 @@ import { Activity, Bot, Camera, Cpu, Gamepad2, Gauge, HelpCircle, MessageCircle,
 import './styles.css'
 
 const DEFAULT_DEVICE = import.meta.env.VITE_DEVICE_ID || 'VB-CAM-E9BFB4'
-const DEFAULT_API = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
-const APP_VERSION = 'v1.1.6 stable AI stream fix'
+const DEFAULT_API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+const APP_VERSION = 'v1.2.0 local LAN compose'
 const DRIVE_INTERVAL_MS = 850
 const DRIVE_TTL_MS = 2000
 
 const FALLBACK_DETECTORS = [
   { id: 'yolo11n.onnx', label: 'ONNX — YOLO11n realtime', recommended_imgsz: 320, speed: 'realtime' },
-  { id: 'yolo11n.onnx', label: 'ONNX — YOLO11n cân bằng', recommended_imgsz: 416, speed: 'balanced' },
+  { id: 'yolo11n.onnx', label: 'ONNX — YOLO11n cân bằng', recommended_imgsz: 320, speed: 'balanced' },
   { id: 'yolov8n.onnx', label: 'ONNX — YOLOv8n fallback', recommended_imgsz: 416, speed: 'fallback' },
   { id: 'torchvision:ssdlite320_mobilenet_v3_large', label: 'SSD MobileNetV3 320 — không YOLO', recommended_imgsz: 320, speed: 'fast' },
 ]
@@ -20,7 +20,6 @@ const FALLBACK_DETECTORS = [
 const FALLBACK_VLMS = [
   { id: 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct', label: 'SmolVLM2 500M — nhẹ nhất' },
   { id: 'HuggingFaceTB/SmolVLM-500M-Instruct', label: 'SmolVLM 500M — ổn định' },
-  { id: 'microsoft/Florence-2-base', label: 'Florence-2 base — OD/grounding' },
 ]
 
 
@@ -445,11 +444,14 @@ function App() {
   const applyProfile = (name) => {
     const profiles = {
       realtime: { detector_key: 'yolo11n.onnx||320||realtime', yolo_model: 'yolo11n.onnx', yolo_imgsz: 320, conf_threshold: 0.25, detect_interval_s: 0.20 },
-      balanced: { detector_key: 'yolo11n.onnx||416||balanced', yolo_model: 'yolo11n.onnx', yolo_imgsz: 416, conf_threshold: 0.25, detect_interval_s: 0.30 },
+      balanced: { detector_key: 'yolo11n.onnx||320||balanced', yolo_model: 'yolo11n.onnx', yolo_imgsz: 320, conf_threshold: 0.25, detect_interval_s: 0.30 },
       fallback: { detector_key: 'yolov8n.onnx||416||fallback', yolo_model: 'yolov8n.onnx', yolo_imgsz: 416, conf_threshold: 0.25, detect_interval_s: 0.35 },
       mobilenet: { detector_key: 'torchvision:ssdlite320_mobilenet_v3_large||320||fast', yolo_model: 'torchvision:ssdlite320_mobilenet_v3_large', yolo_imgsz: 320, conf_threshold: 0.30, detect_interval_s: 0.50 },
+      fasterrcnn: { detector_key: 'torchvision:fasterrcnn_mobilenet_v3_large_320_fpn||320||fasterrcnn', yolo_model: 'torchvision:fasterrcnn_mobilenet_v3_large_320_fpn', yolo_imgsz: 320, conf_threshold: 0.35, detect_interval_s: 1.00 },
+      strong: { detector_key: 'yolo11s.onnx||512||strong', yolo_model: 'yolo11s.onnx', yolo_imgsz: 512, conf_threshold: 0.25, detect_interval_s: 0.50 },
     }
     const p = profiles[name]
+    if (!p) return
     setModelForm(prev => ({ ...prev, ...p }))
     applyAiConfig(p)
   }
@@ -495,7 +497,7 @@ function App() {
       pushAi('assistant', summarizeAi(data), data)
       pushLog('ai', 'AI chat question', data)
     } catch (err) {
-      pushAi('assistant', 'Mình chưa trả lời được câu hỏi này. Nếu VLM đang tắt, model chưa tải xong, hoặc model này không tương thích loader hiện tại thì xem JSON kỹ thuật rồi đổi sang SmolVLM/Florence/Qwen khác.', err)
+      pushAi('assistant', 'Mình chưa trả lời được câu hỏi này. Nếu VLM đang tắt, model chưa tải xong, hoặc model này không tương thích loader hiện tại thì xem JSON kỹ thuật rồi đổi sang SmolVLM/Qwen khác.', err)
     } finally {
       setAiBusy(false)
     }
@@ -526,12 +528,12 @@ function App() {
       <div>
         <div className="eyebrow"><Bot size={18}/> VisionBot Control Center <span>{APP_VERSION}</span></div>
         <h1>Robot AI/IoT Dashboard</h1>
-        <p>Frontend React riêng biệt gọi Backend FastAPI. Backend publish MQTTS xuống ESP32-CAM. AI rút gọn ổn định: YOLO/SSD realtime + VLM hỏi frame. Không preload quá nhiều model để tránh lag stream.</p>
+        <p>Frontend React gọi Backend FastAPI. Backend publish MQTT xuống ESP32-CAM. AI rút gọn ổn định: YOLO/SSD realtime + VLM hỏi frame. Bản LAN chạy bằng Docker Compose.</p>
       </div>
       <div className="statusBox">
         {pill(!!health?.mqtt_connected, health?.mqtt_connected ? 'MQTT backend OK' : 'MQTT backend lỗi')}
         {pill(!!robot?.online, robot?.online ? 'Robot online' : 'Robot offline')}
-        {pill(!!robot?.mqtt_connected, robot?.mqtt_connected ? 'Robot MQTTS OK' : 'Robot MQTTS lỗi')}
+        {pill(!!robot?.mqtt_connected, robot?.mqtt_connected ? 'Robot MQTT OK' : 'Robot MQTT lỗi')}
       </div>
     </header>
 
@@ -554,6 +556,7 @@ function App() {
     </section>
 
     <main className="grid">
+      <section className="leftStack">
       <section className="card videoCard">
         <div className="cardTitle"><Camera/> Camera</div>
         <div className="toolbar">
@@ -629,6 +632,19 @@ function App() {
         <p className="hint">Camera FPS và detector FPS là hai thứ khác nhau. Nếu AI overlay lag, chuyển về Video raw khi lái robot; dùng Detect khi cần nhận dạng.</p>
       </section>
 
+      <section className="card logs">
+        <div className="cardTitle"><Activity/> cmd_ack / logs</div>
+        <div className="logList" ref={logListRef} onScroll={() => { logStickRef.current = isNearBottom(logListRef.current); if (logStickRef.current) setLogUnread(false) }}>
+          {logs.map((l, i) => <div className={`log ${l.type}`} key={i}>
+            <div className="logHead"><b>{l.time}</b> <span>{l.message}</span> <em>{shortJson(l.data)}</em></div>
+            {l.data && <details><summary>Chi tiet JSON</summary><pre>{JSON.stringify(l.data, null, 2)}</pre></details>}
+          </div>)}
+        </div>
+        {logUnread && <button className="jumpBtn" onClick={scrollLogBottom}>Log moi ↓</button>}
+      </section>
+      </section>
+
+      <section className="sideStack">
       <section className="card controlCard">
         <div className="cardTitle"><Gamepad2/> Điều khiển giữ-nút</div>
         <p className="hint">Giữ W/A/S/D hoặc nút bên dưới để chạy. Thả tay sẽ gửi stop. Đã sửa đảo trái/phải theo wiring hiện tại. Mất mạng thì TTL vẫn tự dừng.</p>
@@ -685,16 +701,9 @@ function App() {
         </form>
       </section>
 
-      <section className="card logs">
-        <div className="cardTitle"><Activity/> cmd_ack / logs</div>
-        <div className="logList" ref={logListRef} onScroll={() => { logStickRef.current = isNearBottom(logListRef.current); if (logStickRef.current) setLogUnread(false) }}>
-          {logs.map((l, i) => <div className={`log ${l.type}`} key={i}>
-            <div className="logHead"><b>{l.time}</b> <span>{l.message}</span> <em>{shortJson(l.data)}</em></div>
-            {l.data && <details><summary>Chi tiết JSON</summary><pre>{JSON.stringify(l.data, null, 2)}</pre></details>}
-          </div>)}
-        </div>
-        {logUnread && <button className="jumpBtn" onClick={scrollLogBottom}>Log mới ↓</button>}
       </section>
+
+
     </main>
   </div>
 }
