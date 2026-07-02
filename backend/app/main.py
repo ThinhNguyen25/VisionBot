@@ -665,14 +665,115 @@ def _clean_vlm_text(raw: str) -> str:
     for sep in ["Assistant:", "assistant", "<|assistant|>", "ASSISTANT:"]:
         if sep in text:
             text = text.split(sep)[-1].strip()
-    # If model echoes JSON instruction, keep the tail after answer_vi when possible.
+    # If model echoes a JSON object, extract the user-facing answer when possible.
     if '"answer_vi"' in text:
-        # Do not parse aggressively; just leave JSON-ish text readable.
-        pass
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                obj = json.loads(text[start:end + 1])
+                if isinstance(obj, dict) and obj.get("answer_vi"):
+                    text = str(obj["answer_vi"]).strip()
+        except Exception:
+            pass
+    for fence in ["```json", "```"]:
+        text = text.replace(fence, "").strip()
     # Avoid huge chat bubbles on weak machines.
     if len(text) > 1200:
         text = text[-1200:].strip()
     return text or "Mình chưa tạo được câu trả lời rõ ràng từ VLM."
+
+
+def _pick_label(raw: str, labels: list[str], default: str = "uncertain", priority: list[str] | None = None) -> str:
+    text = (raw or "").lower().strip()
+    text = text.replace("-", "_").replace("slow down", "slow_down").replace("speed up", "speed_up")
+    for ch in ".,:;()[]{}":
+        text = text.replace(ch, " ")
+    hits = []
+    for label in labels:
+        if f" {label.lower()} " in f" {text} ":
+            hits.append(label)
+    if priority:
+        for label in priority:
+            if label in hits:
+                return label
+    return hits[0] if len(hits) == 1 else default
+
+
+def _has_any(text: str, words: list[str]) -> bool:
+    low = (text or "").lower()
+    return any(w in low for w in words)
+
+
+def _caption_has_person(text: str) -> bool:
+    return _has_any(text, ["person", "people", "man", "woman", "child", "human", "người"])
+
+
+def _caption_has_vehicle(text: str) -> bool:
+    return _has_any(text, ["car", "truck", "bus", "motorcycle", "bike", "bicycle", "vehicle", "xe"])
+
+
+def _caption_has_obstacle(text: str) -> bool:
+    return _has_any(text, ["obstacle", "chair", "box", "wall", "door", "table", "bench", "blocked", "barrier", "vật cản"])
+
+
+def _normalize_robot_action(path_status: str, action: str, caption: str, detector_labels: set[str] | None = None) -> str:
+    detector_labels = detector_labels or set()
+    risky_labels = {"person", "car", "truck", "bus", "motorcycle", "bicycle", "dog", "cat", "chair", "bench"}
+    if path_status == "blocked":
+        return "stop"
+    if detector_labels & risky_labels:
+        return "slow_down"
+    if _caption_has_person(caption) or _caption_has_vehicle(caption) or _caption_has_obstacle(caption):
+        return "slow_down"
+    if path_status in {"crowded", "uncertain"}:
+        return "slow_down"
+    if path_status == "clear" and action in {"stop", "turn"}:
+        return "go"
+    return action if action in {"go", "slow_down", "stop", "turn", "speed_up"} else "slow_down"
+
+
+def _build_robot_answer_vi(caption: str, path_status: str, action: str, question: str | None = None) -> str:
+    caption = _clean_vlm_text(caption).strip()
+    if not caption:
+        caption = "khung hình chưa đủ rõ để nhận diện chắc chắn"
+
+    status_vi = {
+        "clear": "Lối phía trước có vẻ khá thoáng.",
+        "crowded": "Phía trước hơi đông hoặc có nhiều vật thể gần robot.",
+        "blocked": "Phía trước có dấu hiệu bị chắn, robot không nên đi thẳng.",
+        "uncertain": "Khung hình chưa đủ chắc chắn, robot nên thận trọng.",
+    }.get(path_status, "Khung hình chưa đủ chắc chắn, robot nên thận trọng.")
+
+    advice_vi = {
+        "go": "Có thể đi tiếp chậm rãi và tiếp tục quan sát.",
+        "slow_down": "Nên giảm tốc, giữ khoảng cách và quan sát thêm trước khi tiến.",
+        "stop": "Nên dừng lại để tránh va chạm.",
+        "turn": "Nên rẽ hoặc đổi hướng để tránh vùng phía trước.",
+        "speed_up": "Chỉ nên tăng tốc nhẹ nếu người điều khiển xác nhận đường thật sự trống.",
+    }.get(action, "Nên đi chậm và quan sát thêm.")
+
+    extra = ""
+    if question:
+        extra = f"\n\nTrả lời câu hỏi: {question.strip()}\nMình dựa trên frame hiện tại; nếu hình mờ hoặc robot đang di chuyển nhanh thì nên kiểm tra lại bằng Video raw."
+
+    return f"Phía trước: {caption}\n\nTình trạng: {status_vi}\n\nLời khuyên: {advice_vi}{extra}"
+
+
+def _robot_chat_prompt(question: str | None = None) -> str:
+    user_question = (question or "").strip()
+    task = user_question[:600] if user_question else "Hãy phân tích khung hình hiện tại cho người đang điều khiển robot."
+    return (
+        "You are the vision assistant for a small ESP32-CAM robot.\n"
+        "Look at the front-camera image and answer in natural Vietnamese.\n"
+        "Do not output JSON, markdown tables, code blocks, or raw debug fields.\n"
+        "Use this exact friendly structure:\n"
+        "Phía trước: one short sentence describing the scene, main objects, people, vehicles, or obstacles.\n"
+        "Tình trạng: choose clear, crowded, blocked, or uncertain, then explain briefly.\n"
+        "Lời khuyên: choose go, slow_down, stop, or turn, then give a safe driving suggestion.\n"
+        "If the image is blurry or uncertain, say you are not sure and recommend slow_down.\n"
+        f"User question: {task}"
+    )
 
 class VisionAI:
     def __init__(self):
@@ -866,7 +967,32 @@ class VisionAI:
         except Exception as exc:
             self.vlm_error = str(exc)
 
-    def analyze_scene(self, jpeg: bytes, question: str | None = None) -> dict[str, Any]:
+    def _vlm_generate_text(self, image, prompt: str, max_new_tokens: int | None = None) -> tuple[str, float]:
+        import torch
+
+        img = image.convert("RGB")
+        img.thumbnail((512, 384))
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
+        text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self.processor(text=text, images=[img], return_tensors="pt")
+        device = next(self.vlm_model.parameters()).device
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            output_ids = self.vlm_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens or AI_VLM_MAX_NEW_TOKENS,
+                do_sample=False,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=4,
+            )
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        input_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+        new_tokens = output_ids[:, input_len:] if input_len else output_ids
+        raw = self.processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
+        return _clean_vlm_text(raw), latency_ms
+
+    def analyze_scene(self, jpeg: bytes, question: str | None = None, detector_labels: set[str] | None = None) -> dict[str, Any]:
         if not AI_ENABLE_VLM:
             return {"enabled": False, "error": "AI_ENABLE_VLM=0. Set AI_ENABLE_VLM=1 to enable VLM."}
         self._load_vlm()
@@ -936,39 +1062,53 @@ class VisionAI:
                     metric = dict(_update_metric(self.vlm_metrics, metric_key, latency_ms, extra={"model": AI_VLM_MODEL, "family": self.vlm_family, "last_objects": len(detections)}))
                 return {"enabled": True, "model": AI_VLM_MODEL, "family": self.vlm_family, "raw": raw, "parsed": parsed, "detections": detections, "detections_count": len(detections), "answer_vi": answer, "inference_ms": latency_ms, "inference_fps": round(1000.0 / latency_ms, 2) if latency_ms > 0 else 0.0, "metric_key": metric_key, "model_metric": metric, "created_ms": created}
 
-            base_prompt = (
-                "Bạn là AI thị giác của robot ESP32-CAM. Hãy nhìn ảnh hiện tại và trả lời bằng tiếng Việt, "
-                "ngắn gọn nhưng thật hữu ích cho người điều khiển. "
-                "Ưu tiên: nhận diện vật thể chính, vật cản, người/xe/đồ vật gần robot, tình trạng đường phía trước. "
-                "Nếu detector realtime đã liệt kê vật thể thì dùng như gợi ý nhưng vẫn tự kiểm tra lại ảnh. "
-                "Nếu không tự vẽ bbox được thì vẫn hãy gọi tên vật thể và vị trí tương đối: trái/phải/giữa/gần/xa. "
-                "Trả lời rõ: thấy gì, có vật cản không, nên go/slow_down/stop/turn. "
-                "Không bịa vật thể nếu ảnh mờ; nếu không chắc hãy nói không chắc. "
-                "Nếu được hỏi về vật thể, hãy trả lời như chat tự nhiên, không cần JSON."
+            caption_prompt = (
+                "Look at the image from a small robot front camera. "
+                "Describe what is visible ahead in one short natural Vietnamese sentence. "
+                "Mention the main scene, objects, people, vehicles, or obstacles. "
+                "Do not give advice. Do not use JSON."
+            )
+            path_prompt = (
+                "Look at the robot front-camera image. For a robot moving forward, choose the path status. "
+                "Answer only one word: clear, crowded, blocked, uncertain."
+            )
+            action_prompt = (
+                "Look at the robot front-camera image. What should the robot do next? "
+                "Answer only one action: go, slow_down, stop, turn, speed_up."
             )
             if question:
-                prompt = base_prompt + "\nCâu hỏi của người dùng: " + str(question)[:600]
-            else:
-                prompt = base_prompt + "\nHãy mô tả các vật thể trong ảnh và gợi ý điều khiển an toàn."
-            messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-            text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
-            inputs = self.processor(text=text, images=[image], return_tensors="pt")
-            device = next(self.vlm_model.parameters()).device
-            inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
-            t0 = time.perf_counter()
-            with torch.no_grad():
-                output_ids = self.vlm_model.generate(**inputs, max_new_tokens=AI_VLM_MAX_NEW_TOKENS)
-            latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
-            raw = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
-            answer = _clean_vlm_text(raw)
+                caption_prompt += f" User question context: {question[:500]}"
+
+            raw_caption, caption_ms = self._vlm_generate_text(image, caption_prompt, max_new_tokens=70)
+            raw_path, path_ms = self._vlm_generate_text(image, path_prompt, max_new_tokens=12)
+            raw_action, action_ms = self._vlm_generate_text(image, action_prompt, max_new_tokens=12)
+            latency_ms = round(caption_ms + path_ms + action_ms, 1)
+            path_status = _pick_label(raw_path, ["clear", "crowded", "blocked", "uncertain"], default="uncertain", priority=["blocked", "crowded", "uncertain", "clear"])
+            action = _pick_label(raw_action, ["go", "slow_down", "stop", "turn", "speed_up"], default="slow_down", priority=["stop", "turn", "slow_down", "go", "speed_up"])
+            action = _normalize_robot_action(path_status, action, raw_caption, detector_labels=detector_labels)
+            answer = _build_robot_answer_vi(raw_caption, path_status, action, question=question)
+            raw = raw_caption
             created = now_ms()
             metric_key = _model_metric_key("vlm", AI_VLM_MODEL)
             with self.lock:
                 self.vlm_latency_ms.append(latency_ms)
                 self.last_vlm_ms = latency_ms
                 self.last_vlm_created_ms = created
-                metric = dict(_update_metric(self.vlm_metrics, metric_key, latency_ms, extra={"model": AI_VLM_MODEL, "family": self.vlm_family}))
-            return {"enabled": True, "model": AI_VLM_MODEL, "family": self.vlm_family, "raw": raw, "answer_vi": answer, "inference_ms": latency_ms, "inference_fps": round(1000.0 / latency_ms, 2) if latency_ms > 0 else 0.0, "metric_key": metric_key, "model_metric": metric, "created_ms": created}
+                metric = dict(_update_metric(self.vlm_metrics, metric_key, latency_ms, extra={"model": AI_VLM_MODEL, "family": self.vlm_family, "path_status": path_status, "action": action}))
+            debug = {
+                "raw_caption": raw_caption,
+                "raw_path": raw_path,
+                "raw_action": raw_action,
+                "path_status": path_status,
+                "action": action,
+                "caption_ms": caption_ms,
+                "path_ms": path_ms,
+                "action_ms": action_ms,
+                "has_vehicle": _caption_has_vehicle(raw_caption),
+                "has_person": _caption_has_person(raw_caption),
+                "has_obstacle": _caption_has_obstacle(raw_caption),
+            }
+            return {"enabled": True, "model": AI_VLM_MODEL, "family": self.vlm_family, "raw": raw, "answer_vi": answer, "path_status": path_status, "action": action, "debug": debug, "inference_ms": latency_ms, "inference_fps": round(1000.0 / latency_ms, 2) if latency_ms > 0 else 0.0, "metric_key": metric_key, "model_metric": metric, "created_ms": created}
         except Exception as exc:
             return {"enabled": True, "model": AI_VLM_MODEL, "family": self.vlm_family, "error": str(exc)}
 
@@ -1226,13 +1366,17 @@ def ai_analyze(device_id: str):
     if frame is None:
         raise HTTPException(status_code=503, detail={"error": "no_camera_frame", "camera_session": session.snapshot()})
     detections = vision_ai.detect(frame, force=True)
-    scene = vision_ai.analyze_scene(frame)
+    detector_labels = {d.get("label", "").lower() for d in detections.get("detections", [])}
+    scene = vision_ai.analyze_scene(frame, detector_labels=detector_labels)
     # Safety layer: if detector/VLM sees people/vehicles/obstacles, do not blindly go.
-    labels = {d.get("label", "").lower() for d in detections.get("detections", [])}
+    labels = set(detector_labels)
     labels |= {d.get("label", "").lower() for d in scene.get("detections", [])} if isinstance(scene, dict) else set()
     risky = bool(labels & {"person", "car", "truck", "bus", "motorcycle", "bicycle", "dog", "cat", "chair", "bench"})
-    safety = {"risk_detected": risky, "safe_action": "slow_down" if risky else "go", "rule": "detector/VLM risky label override" if risky else "no risky label detected"}
-    return {"device_id": device_id, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
+    safe_action = scene.get("action") if isinstance(scene, dict) and scene.get("action") else ("slow_down" if risky else "go")
+    if risky and safe_action == "go":
+        safe_action = "slow_down"
+    safety = {"risk_detected": risky, "safe_action": safe_action, "rule": "detector/VLM risky label override" if risky else "VLM robot action"}
+    return {"device_id": device_id, "answer": scene.get("answer_vi") if isinstance(scene, dict) else None, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
 
 
 @app.post("/api/robots/{device_id}/ai/ask")
@@ -1245,12 +1389,16 @@ def ai_ask(device_id: str, req: AIAskRequest):
     dets = detections.get("detections", []) if isinstance(detections, dict) else []
     det_summary = ", ".join([f"{d.get('label')} {d.get('confidence')}" for d in dets[:8]]) or "không có detection rõ từ detector realtime"
     vlm_question = f"Detector realtime đang thấy: {det_summary}. Người dùng hỏi: {req.question}"
-    scene = vision_ai.analyze_scene(frame, question=vlm_question)
-    labels = {d.get("label", "").lower() for d in detections.get("detections", [])}
+    detector_labels = {d.get("label", "").lower() for d in detections.get("detections", [])}
+    scene = vision_ai.analyze_scene(frame, question=vlm_question, detector_labels=detector_labels)
+    labels = set(detector_labels)
     labels |= {d.get("label", "").lower() for d in scene.get("detections", [])} if isinstance(scene, dict) else set()
     risky = bool(labels & {"person", "car", "truck", "bus", "motorcycle", "bicycle", "dog", "cat", "chair", "bench"})
-    safety = {"risk_detected": risky, "safe_action": "slow_down" if risky else "go", "rule": "detector/VLM risky label override" if risky else "no risky label detected"}
-    return {"device_id": device_id, "question": req.question, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
+    safe_action = scene.get("action") if isinstance(scene, dict) and scene.get("action") else ("slow_down" if risky else "go")
+    if risky and safe_action == "go":
+        safe_action = "slow_down"
+    safety = {"risk_detected": risky, "safe_action": safe_action, "rule": "detector/VLM risky label override" if risky else "VLM robot action"}
+    return {"device_id": device_id, "question": req.question, "answer": scene.get("answer_vi") if isinstance(scene, dict) else None, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
 
 
 @app.post("/api/robots/{device_id}/control/drive")

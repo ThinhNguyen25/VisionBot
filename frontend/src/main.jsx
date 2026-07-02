@@ -62,6 +62,24 @@ function shortJson(value) {
   return ''
 }
 
+function cleanChatText(value) {
+  let text = String(value || '').trim()
+  if (!text) return ''
+  text = text.replace(/```json|```/g, '').trim()
+  if (text.includes('"answer_vi"')) {
+    try {
+      const start = text.indexOf('{')
+      const end = text.lastIndexOf('}')
+      if (start >= 0 && end > start) {
+        const obj = JSON.parse(text.slice(start, end + 1))
+        if (obj?.answer_vi) text = String(obj.answer_vi).trim()
+      }
+    } catch (_) {}
+  }
+  if (text.length > 1400) text = text.slice(-1400).trim()
+  return text
+}
+
 function summarizeAi(data) {
   const detectionBlock = data?.detections?.detections ? data.detections : data
   const dets = detectionBlock?.detections || []
@@ -69,51 +87,45 @@ function summarizeAi(data) {
   const scene = data?.scene || {}
   const safety = data?.safety || {}
   const sceneError = scene?.error || ''
-  const vlmDets = Array.isArray(scene?.detections) ? scene.detections : []
+  let sceneText = data?.answer || scene?.answer_vi || scene?.description_vi || scene?.description || scene?.caption_vi || scene?.caption || ''
 
   if (detectError) {
     if (String(detectError).includes('ultralytics')) {
-      return 'Mình chưa chạy được YOLO vì backend thiếu ultralytics. Hãy cài backend/requirements-ai.txt rồi restart backend.'
+      return 'Mình chưa chạy được detector vì backend thiếu thư viện AI. Hãy rebuild backend rồi thử lại.'
     }
-    return `YOLO đang lỗi: ${detectError}`
+    return `Detector đang lỗi: ${detectError}`
+  }
+
+  if (sceneText) {
+    sceneText = cleanChatText(sceneText)
+    return sceneText
   }
 
   const lines = []
   if (Array.isArray(dets) && dets.length) {
-    lines.push('Detector realtime thấy các vật thể sau:')
-    dets.slice(0, 8).forEach((d, idx) => {
+    const names = dets.slice(0, 5).map(d => {
       const label = d.label || d.name || d.class_name || 'object'
       const conf = Math.round((d.confidence || d.conf || 0) * 100)
-      lines.push(`${idx + 1}. ${label} — độ tin cậy khoảng ${conf}%`)
+      return `${label}${conf ? ` (${conf}%)` : ''}`
     })
+    lines.push(`Phía trước: mình thấy ${names.join(', ')}.`)
   } else {
-    lines.push('Detector realtime chưa thấy vật thể rõ ràng trong frame này. Thử tăng ánh sáng, đưa vật thể gần hơn, hoặc chọn model mạnh hơn ở phần AI model.')
+    lines.push('Phía trước: mình chưa thấy vật thể rõ ràng trong frame này.')
   }
-
-  if (vlmDets.length) {
-    lines.push('VLM cũng trả về bbox/nhãn:')
-    vlmDets.slice(0, 8).forEach((d, idx) => lines.push(`${idx + 1}. ${d.label || 'object'} — nguồn ${d.source || 'vlm'}`))
-  }
-
-  const latency = detectionBlock?.inference_ms || data?.inference_ms
-  if (latency) lines.push(`Detector xử lý frame này mất khoảng ${latency} ms.`)
 
   if (sceneError) {
     if (String(sceneError).includes('AI_ENABLE_VLM=0')) {
-      lines.push('VLM đang tắt ở backend, nên mình mới chỉ phân tích bằng detector realtime.')
+      lines.push('Tình trạng: VLM đang tắt, nên mình mới trả lời dựa trên detector realtime.')
     } else if (String(sceneError).includes('transformers') || String(sceneError).includes('AutoModel')) {
-      lines.push('VLM chưa load được vì thư viện transformers/model trong backend chưa đúng. Cần nâng dependencies rồi restart backend.')
+      lines.push('Tình trạng: VLM chưa load được vì thiếu hoặc sai thư viện model.')
     } else {
-      lines.push(`VLM đang lỗi: ${sceneError}`)
+      lines.push(`Tình trạng: VLM đang lỗi: ${sceneError}`)
     }
-  } else {
-    let sceneText = scene?.answer_vi || scene?.description_vi || scene?.description || scene?.caption_vi || scene?.caption || scene?.raw || ''
-    if (sceneText && sceneText.length > 800) sceneText = sceneText.slice(-800)
-    if (sceneText) lines.push(`VLM trả lời: ${sceneText}`)
   }
 
   const action = safety?.safe_action || scene?.suggested_action || scene?.action || ''
-  if (action) lines.push(`Gợi ý an toàn: ${action}`)
+  if (action) lines.push(`Lời khuyên: ${action}. Nếu đang lái thật thì đi chậm và quan sát thêm.`)
+  else lines.push('Lời khuyên: đi chậm và quan sát thêm trước khi tiến tiếp.')
   return lines.join('\n')
 }
 
@@ -419,7 +431,7 @@ function App() {
       pushAi('assistant', `Đã đổi cấu hình AI. Detector: ${data.ai?.yolo?.model}, imgsz ${data.ai?.yolo?.imgsz}, conf ${data.ai?.yolo?.conf_threshold}. VLM: ${data.ai?.vlm?.enabled ? 'bật' : 'tắt'} (${data.ai?.vlm?.model || modelForm.vlm_model}).`, data)
       pushLog('ok', 'AI config updated', data)
     } catch (err) {
-      pushAi('assistant', 'Mình chưa đổi được cấu hình AI. Mở JSON kỹ thuật để xem lỗi backend.', err)
+      pushAi('assistant', 'Mình chưa đổi được cấu hình AI. Xem khung cmd_ack/logs bên dưới để biết lỗi backend.', err)
     }
   }
 
@@ -435,7 +447,7 @@ function App() {
       pushAi('assistant', 'Mình đã tải/khởi động model đang chọn xong. Nếu model lớn, lần đầu có thể mất lâu; lần sau dùng cache local.', data)
       pushLog('ok', 'AI model preloaded', data)
     } catch (err) {
-      pushAi('assistant', 'Mình chưa preload được model. Mở JSON kỹ thuật để xem lỗi.', err)
+      pushAi('assistant', 'Mình chưa preload được model. Xem khung cmd_ack/logs bên dưới để biết lỗi.', err)
     } finally {
       setAiBusy(false)
     }
@@ -497,7 +509,7 @@ function App() {
       pushAi('assistant', summarizeAi(data), data)
       pushLog('ai', 'AI chat question', data)
     } catch (err) {
-      pushAi('assistant', 'Mình chưa trả lời được câu hỏi này. Nếu VLM đang tắt, model chưa tải xong, hoặc model này không tương thích loader hiện tại thì xem JSON kỹ thuật rồi đổi sang SmolVLM/Qwen khác.', err)
+      pushAi('assistant', 'Mình chưa trả lời được câu hỏi này. Nếu VLM đang tắt thì bật VLM và tải model trước; nếu vẫn lỗi thì xem cmd_ack/logs để kiểm tra backend.', err)
     } finally {
       setAiBusy(false)
     }
@@ -684,7 +696,6 @@ function App() {
           {aiMessages.map((m, i) => <div key={i} className={`msg ${m.role}`}>
             <div className="msgMeta">{m.role === 'user' ? 'Bạn' : 'VisionBot AI'} · {m.time}</div>
             <div className="bubble">{m.text}</div>
-            {m.data && <details><summary>Xem JSON kỹ thuật</summary><pre>{JSON.stringify(m.data, null, 2)}</pre></details>}
           </div>)}
           {aiBusy && <div className="msg assistant typingMsg">
             <div className="msgMeta">VisionBot AI · đang suy luận</div>
