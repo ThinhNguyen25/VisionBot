@@ -1,501 +1,401 @@
 # VisionBot AI/IoT Dashboard
 
-VisionBot là robot ESP32-CAM AI/IoT dùng **frontend React/Vite**, **backend FastAPI**, **Mosquitto MQTTS**, và **ESP32-CAM headless**. Frontend không điều khiển trực tiếp ESP32-CAM; mọi lệnh đi qua backend, backend publish MQTTS xuống robot.
+VisionBot la robot ESP32-CAM dung dashboard React, backend FastAPI AI, MQTT broker Mosquitto va Docker Compose de chay local LAN. Ban hien tai uu tien demo nhanh, on dinh, mang di may nao cung chay duoc neu laptop phat hotspot co dinh.
 
-## 1. Kiến trúc
+## 1. Ban nay chay nhu the nao
 
 ```text
-Frontend React/Vite
-  -> Backend FastAPI
-      -> Mosquitto MQTTS broker
-          -> ESP32-CAM firmware
+Phone/Laptop browser
+  -> Frontend dashboard: http://192.168.137.1:5173
+      -> Backend FastAPI + AI: http://192.168.137.1:8000
+          -> MQTT broker trong Docker: external 1884 -> internal 1883
+              -> ESP32-CAM robot
 
 ESP32-CAM
-  -> WebSocket JPEG stream port 86
-  -> Backend relay MJPEG raw/AI overlay
+  -> Wi-Fi hotspot: VisionBot-LAN
+  -> MQTT: 192.168.137.1:1884
+  -> Camera WebSocket: ws://<ESP-IP>:86/
 ```
 
-AI trong dự án có 2 nhánh:
+Khong con MQTTS/cert cho ban demo nay. MQTT la plain TCP trong mang local/hotspot rieng de giam loi khi doi Wi-Fi, doi IP laptop.
+
+## 2. Cau hinh co dinh de dem di demo
+
+Bat Windows Mobile Hotspot:
 
 ```text
-Detector realtime
-  - YOLO ONNX CPU
-  - SSDlite MobileNetV3 / Faster R-CNN / RetinaNet / FCOS qua TorchVision
-  - trả bbox + nhãn + latency + FPS
-
-VLM hỏi đáp theo frame
-  - SmolVLM / SmolVLM2 / Florence-2 / Qwen2.5-VL 3B / PaliGemma2 3B
-  - trả lời câu hỏi về frame hiện tại
-  - có latency/FPS để benchmark
-  - không dùng realtime liên tục trên CPU
+SSID: VisionBot-LAN
+Password: visionbot123
+Laptop hotspot IP thuong la: 192.168.137.1
 ```
 
-## 2. Phần cứng đang hỗ trợ
-
-Phần cứng hiện tại của project:
+Firmware ESP32-CAM ban demo da mac dinh:
 
 ```text
-ESP32-CAM AI Thinker + camera OV3660
-L298N motor driver
-2 motor DC vàng
-Servo GPIO2
-Laptop Windows + Ubuntu WSL2
-Mosquitto Docker broker
+Wi-Fi SSID: VisionBot-LAN
+Wi-Fi password: visionbot123
+MQTT host: 192.168.137.1
+MQTT external port: 1884
+MQTT username/password: de trong
+Device ID: VB-CAM-E9BFB4
 ```
 
-Pin firmware hiện tại:
+Neu ESP32-CAM cua ban da nap firmware `v1.2.1-compose-hotspot-port1884` va serial log da hien `MQTT connected`, thi khong can nap lai code moi lan chay.
 
-```text
-IN1 = GPIO12
-IN2 = GPIO13
-IN3 = GPIO14
-IN4 = GPIO15
-Servo = GPIO2
-Camera AI Thinker pins giữ theo firmware
-```
+## 3. Can cai gi tren may moi
 
-ESP32-CAM dùng MQTTS strict TLS, không dùng setInsecure.
-
-## 3. App/framework cần cài trên máy mới
-
-Trên Windows:
+Tren Windows:
 
 ```text
 Docker Desktop
 Ubuntu WSL2
-Arduino IDE
 Git
-GitHub CLI nếu muốn push repo nhanh
-Trình duyệt Chrome/Edge
+Chrome/Edge
+Arduino IDE chi can neu phai nap lai ESP32-CAM
 ```
 
 Trong Ubuntu WSL:
 
 ```bash
 sudo apt update
-sudo apt install -y git unzip curl ca-certificates openssl python3 python3-venv python3-pip
+sudo apt install -y git curl unzip ca-certificates
 ```
 
-Node.js cần bản 20 trở lên. Nếu `node -v` dưới 20, cài bằng `n`:
+Docker Desktop can bat WSL Integration cho distro Ubuntu dang dung.
 
-```bash
-sudo apt install -y nodejs npm
-sudo npm install -g n
-sudo n 20.19.0
-hash -r
-node -v
-npm -v
-```
+## 4. Lay project tu GitHub
 
-Docker Desktop cần bật WSL Integration cho Ubuntu distro đang dùng.
-
-## 4. Copy project vào WSL
-
-Nếu project đang ở Windows:
-
-```text
-C:\HocTap\TrienKhaiUngDungAIoT\VisionBot_MQTTS_Backend_Starter
-```
-
-Copy sang WSL:
+Trong WSL:
 
 ```bash
 mkdir -p ~/visionbot
-cp -a /mnt/c/HocTap/TrienKhaiUngDungAIoT/VisionBot_MQTTS_Backend_Starter ~/visionbot/
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter
-ls
+cd ~/visionbot
+git clone https://github.com/ThinhNguyen25/VisionBot.git VisionBot-main
+cd VisionBot-main
 ```
 
-Cần thấy:
-
-```text
-backend  broker  frontend  scripts
-```
-
-Nếu `cp` báo không đọc được `broker/certs/ca.key` do permission, vẫn có thể chạy nếu còn đủ `ca.crt`, `server.crt`, `server.key`. `ca.key` chỉ cần khi tạo lại cert.
-
-## 5. Broker MQTTS
-
-### 5.1. Chạy broker
+Neu da clone roi va muon cap nhat ban moi:
 
 ```bash
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter/broker
-docker compose down
-docker compose up -d
-docker ps
-docker logs visionbot-mosquitto --tail 80
+cd ~/visionbot/VisionBot-main
+git pull
 ```
 
-Log mong muốn:
+## 5. Chay toan bo he thong bang mot lenh
 
-```text
-Opening ipv4 listen socket on port 8883
-mosquitto version ... running
-```
-
-### 5.2. Khi đổi Wi-Fi/IP laptop
-
-ESP32-CAM không dùng IP WSL kiểu `172.x.x.x`. ESP32-CAM dùng IP Wi-Fi của laptop, ví dụ:
-
-```text
-192.168.1.66
-```
-
-Nếu IP Wi-Fi đổi, tạo lại server cert có SAN IP mới:
+Bat Docker Desktop truoc, sau do trong WSL:
 
 ```bash
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter
-./scripts/create_broker_certs_wsl.sh
+cd ~/visionbot/VisionBot-main
+docker compose up -d --build
+docker compose ps
 ```
 
-Nhập IP Wi-Fi laptop khi script hỏi. Sau đó restart broker:
+Lenh nay bat cung luc:
+
+```text
+visionbot-mqtt       Mosquitto MQTT broker, port ngoai 1884
+visionbot-backend    FastAPI + AI, port 8000
+visionbot-frontend   Dashboard, port 5173
+```
+
+Lan dau can internet de tai Docker image, Python packages va Node packages. Nhung lan sau co the chay nhanh hon:
 
 ```bash
-cd broker
-docker compose down
 docker compose up -d
 ```
 
-Lấy Root CA để dán vào ESP32-CAM config portal:
+## 6. Mo giao dien dieu khien
 
-```bash
-cat broker/certs/ca.crt
-```
-
-Nếu portal chỉ nhận một dòng, chuyển newline thành `\n`:
-
-```bash
-python3 - <<'PY'
-from pathlib import Path
-p = Path('broker/certs/ca.crt')
-print(p.read_text().replace('\r','').replace('\n','\\n'))
-PY
-```
-
-## 6. ESP32-CAM config portal
-
-Khi firmware mở portal, nhập:
-
-```text
-Wi-Fi SSID: Wi-Fi của bạn
-Wi-Fi password: mật khẩu Wi-Fi
-MQTT host: IP Wi-Fi laptop, ví dụ 192.168.1.66
-MQTT port: 8883
-MQTT username: VB-CAM-E9BFB4
-MQTT password: robot-pass-123
-MQTT base topic: visionbot
-Root CA: nội dung ca.crt
-```
-
-Không nhập `localhost` cho ESP32-CAM. `localhost` chỉ dùng cho backend khi backend và broker chạy cùng máy.
-
-## 7. Backend FastAPI
-
-### 7.1. Cài backend
-
-```bash
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter
-./scripts/install_backend_wsl.sh
-```
-
-Script sẽ tạo:
-
-```text
-backend/.venv
-backend/.env
-```
-
-Mở `backend/.env` nếu muốn sửa broker/model:
-
-```bash
-nano backend/.env
-```
-
-### 7.2. Chạy backend CPU/GPU auto
-
-```bash
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter
-./scripts/run_backend_wsl_auto.sh
-```
-
-Script tự kiểm tra:
-
-```text
-Có NVIDIA CUDA trong WSL -> cho phép AI_DEVICE=auto/cuda
-Không có CUDA -> dùng CPU defaults: yolo11n.onnx imgsz 320
-```
-
-Kiểm tra runtime:
-
-```bash
-./scripts/check_ai_runtime.sh
-```
-
-Test backend:
-
-```bash
-curl http://localhost:8000/api/health
-```
-
-Nếu thấy `mqtt_connected: true` và robot online trong UI là ổn.
-
-### 7.3. Chạy CPU cố định
-
-Máy không GPU nên có thể dùng:
-
-```bash
-./scripts/run_backend_wsl_cpu.sh
-```
-
-Cấu hình CPU khuyên dùng:
-
-```text
-Detector: yolo11n.onnx
-imgsz: 320 hoặc 416
-conf: 0.25
-interval: 0.20
-VLM: SmolVLM 500M hoặc Florence-2 base khi cần hỏi đáp
-```
-
-### 7.4. GPU NVIDIA tùy chọn
-
-Nếu máy khác có NVIDIA GPU:
-
-```bash
-nvidia-smi
-cd backend
-source .venv/bin/activate
-python - <<'PY'
-import torch
-print(torch.cuda.is_available())
-if torch.cuda.is_available():
-    print(torch.cuda.get_device_name(0))
-PY
-```
-
-Nếu CUDA hoạt động, có thể dùng `backend/.env.gpu.example`:
-
-```bash
-cp backend/.env.gpu.example backend/.env
-./scripts/run_backend_wsl_auto.sh
-```
-
-Nếu `torch.cuda.is_available()` vẫn `False`, máy đó đang dùng PyTorch CPU hoặc WSL/GPU driver chưa đúng. Khi đó quay lại CPU ONNX.
-
-## 8. Frontend React/Vite
-
-Cài frontend:
-
-```bash
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter
-./scripts/install_frontend_wsl.sh
-```
-
-Chạy frontend:
-
-```bash
-./scripts/run_frontend_wsl.sh
-```
-
-Mở trên laptop:
+Tren laptop:
 
 ```text
 http://localhost:5173
 ```
 
-Mở từ điện thoại cùng Wi-Fi:
+Tren dien thoai hoac may khac dang noi vao hotspot `VisionBot-LAN`:
 
 ```text
-http://<IP-Wi-Fi-laptop>:5173
+http://192.168.137.1:5173
 ```
 
-Nếu dùng điện thoại, sửa `frontend/.env`:
+Backend health:
 
 ```text
-VITE_API_BASE=http://192.168.1.66:8000
-VITE_DEVICE_ID=VB-CAM-E9BFB4
+http://192.168.137.1:8000/api/health
 ```
 
-Sau đó restart frontend.
+Frontend tu tinh backend theo host dang mo, nen khong can sua `frontend/.env` khi xem tren dien thoai.
 
-## 9. Ý nghĩa nút trong UI
+## 7. Trinh tu demo nhanh
 
-```text
-Làm mới      -> refresh health/state/AI status
-Manual mode  -> thoát estop, cho phép robot nhận drive
-Dừng khẩn cấp -> emergency stop, muốn chạy lại cần Manual mode
-Video raw    -> stream camera gốc từ ESP32-CAM
-AI overlay   -> stream camera có bbox detector
-Detect       -> chạy detector một frame
-VLM          -> dùng VLM nhìn frame hiện tại và trả lời
-Tắt stream   -> ngắt receiver camera backend
-Tải model    -> preload detector/VLM đang chọn
-Áp dụng      -> lưu detector/imgsz/conf/interval/VLM đang chọn vào backend
-```
-
-Điều khiển robot:
-
-```text
-Giữ W / nút Tiến  -> robot tiến, frontend gửi keepalive drive
-Thả tay           -> frontend gửi stop
-Mất mạng/browser tắt -> ESP tự dừng nhờ TTL
-A/D               -> trái/phải đã được sửa ở frontend nếu phần cứng bị đảo
-```
-
-## 10. AI model trong UI
-
-### Detector realtime
-
-Nhóm này dùng cho bbox/nhãn, có thể chạy liên tục:
-
-```text
-ONNX — YOLO11n realtime        nhanh nhất CPU
-ONNX — YOLO11n cân bằng        chính xác hơn chút
-ONNX — YOLO11s mạnh hơn        nặng hơn
-ONNX — YOLOv8n nhẹ             fallback ổn định
-ONNX — YOLOv8s cân bằng        so sánh YOLOv8/YOLO11
-SSD MobileNetV3 320            non-YOLO detector nhẹ
-Faster R-CNN MobileNetV3 320   non-YOLO chính xác hơn, chậm hơn
-RetinaNet / FCOS               model nặng để benchmark
-```
-
-### VLM hỏi đáp theo frame
-
-Nhóm này dùng để hỏi đáp/caption/nhận dạng sâu, không nên chạy realtime liên tục trên CPU:
-
-```text
-SmolVLM 500M          nhẹ nhất
-SmolVLM2 500M         thử so sánh
-SmolVLM2 2.2B         mạnh hơn, chậm hơn
-Florence-2 base       có OD/grounding/bbox theo prompt
-Florence-2 large      mạnh hơn base
-Qwen2.5-VL 3B         nhận dạng/localization tốt nhưng chậm CPU
-PaliGemma2 3B         VLM 3B để so sánh
-```
-
-## 11. FPS/latency nên hiểu thế nào
-
-```text
-Stream FPS       FPS camera/backend nhận được
-Frame KB         kích thước JPEG frame mới nhất
-Infer            latency lần detector gần nhất
-Avg              latency trung bình detector model đang chọn
-AI FPS           ước lượng 1000 / avg_ms của detector
-VLM latency      thời gian một lượt VLM trả lời
-VLM FPS          chỉ để benchmark; VLM CPU thường rất thấp
-```
-
-Với CPU laptop:
-
-```text
-Stream FPS 18-30 là ổn
-YOLO ONNX 320 dưới 100 ms là ổn
-VLM vài chục giây/lượt là bình thường nếu CPU yếu
-```
-
-## 12. GitHub upload an toàn
-
-Không upload secret/model/cache:
-
-```text
-broker/certs/*.key
-broker/passwords
-backend/.env
-frontend/.env
-backend/.venv
-frontend/node_modules
-backend/models
-*.pt
-*.onnx
-*.safetensors
-```
-
-Patch đã có `.gitignore`, nhưng vẫn kiểm tra trước khi commit:
+1. Bat Docker Desktop.
+2. Bat Windows Mobile Hotspot:
+   `VisionBot-LAN` / `visionbot123`.
+3. Cam nguon ESP32-CAM.
+4. Chay:
 
 ```bash
-cd ~/visionbot/VisionBot_MQTTS_Backend_Starter
-git status --ignored
+cd ~/visionbot/VisionBot-main
+docker compose up -d --build
 ```
 
-Tạo repo GitHub:
-
-```bash
-sudo apt install -y git gh
-gh auth login
-
-git init
-git branch -M main
-git add .
-git status
-git commit -m "Initial VisionBot AIoT dashboard"
-gh repo create VisionBot --private --source=. --remote=origin --push
-```
-
-Muốn public:
-
-```bash
-gh repo create VisionBot --public --source=. --remote=origin --push
-```
-
-Nếu lỡ add file nhạy cảm trước khi `.gitignore` có hiệu lực:
-
-```bash
-git rm -r --cached .
-git add .
-git status
-git commit -m "Clean VisionBot project"
-git push -u origin main
-```
-
-## 13. Lỗi thường gặp
-
-### Frontend chọn model nhưng bị quay lại mặc định
-
-Dùng patch v1.1.5 trở lên. Nguyên nhân cũ là frontend polling `/ai/status` và tự sync lại model đang chạy ở backend trước khi người dùng bấm `Áp dụng`.
-
-### No module named ultralytics
-
-```bash
-cd backend
-source .venv/bin/activate
-pip install --upgrade -r requirements-ai.txt
-```
-
-### VLM quá chậm
-
-Bình thường nếu CPU. Dùng VLM theo lượt hỏi đáp, không chạy realtime.
-
-### ESP không kết nối MQTTS
-
-Kiểm tra:
+5. Mo:
 
 ```text
-ESP MQTT host = IP Wi-Fi laptop
-server.crt SAN có IP Wi-Fi đó
-ESP Root CA = ca.crt hiện tại
-broker docker expose 0.0.0.0:8883
-firewall mở port 8883
+http://192.168.137.1:5173
 ```
 
-### Điện thoại không mở frontend/backend
+6. Trong UI bam `Lam moi`, thay MQTT OK va Robot online la co the lai.
 
-Chạy backend/frontend với `--host 0.0.0.0`, dùng IP Wi-Fi laptop, không dùng `localhost` trên điện thoại.
+## 8. Kiem tra log khi co loi
 
----
+Xem cac container:
 
-## v1.1.6 Stable AI Stream Note
+```bash
+docker compose ps
+```
 
-Nếu bản multi-model trước đó làm AI overlay lag hoặc báo lỗi kiểu:
+Xem MQTT:
+
+```bash
+docker compose logs -f mqtt
+```
+
+Khi ESP ket noi dung, log se co dong gan giong:
 
 ```text
-INVALID_ARGUMENT: Got 416 Expected 320
+New client connected ... as VB-CAM-E9BFB4
 ```
 
-hãy dùng bản v1.1.6. Bản này rút gọn model để giữ ổn định:
+Xem backend:
 
-- Realtime CPU: `ONNX — YOLO11n realtime`, `imgsz=320`
-- Cân bằng: `ONNX — YOLO11n cân bằng`, `imgsz=416`
-- Fallback: `ONNX — YOLOv8n fallback`, `imgsz=416`
-- Non-YOLO: `SSD MobileNetV3 320`
+```bash
+docker compose logs -f backend
+```
 
-VLM chỉ dùng để hỏi một frame hiện tại. Không dùng VLM để stream realtime trên CPU.
+Test API:
+
+```bash
+curl http://localhost:8000/api/health
+curl http://localhost:8000/api/robots
+```
+
+Nghe MQTT topic truc tiep:
+
+```bash
+docker exec -it visionbot-mqtt mosquitto_sub -h localhost -p 1883 -t 'visionbot/#' -v
+```
+
+## 9. Dung he thong
+
+Dung container nhung giu volume/cache:
+
+```bash
+docker compose down
+```
+
+Xoa sach volume MQTT/model cache de lam lai tu dau:
+
+```bash
+docker compose down -v
+```
+
+## 10. Nap ESP32-CAM khi nao
+
+Khong can nap lai neu ESP dang co ban demo:
+
+```text
+Firmware: v1.2.1-compose-hotspot-port1884
+Wi-Fi: VisionBot-LAN
+MQTT: 192.168.137.1:1884
+```
+
+Chi nap lai khi:
+
+```text
+ESP dang la firmware MQTTS cu
+ESP dang tro ve MQTT port 1883/8883 sai voi Docker Compose moi
+ESP khong tu vao VisionBot-LAN
+Muon doi ten Wi-Fi/password/hardware pin
+```
+
+File firmware:
+
+```text
+firmware/VisionBot_ESP32CAM/VisionBot_ESP32CAM.ino
+```
+
+Arduino libraries can co:
+
+```text
+WiFiManager
+PubSubClient
+WebSockets
+ArduinoJson
+ESP32 board package co esp32-camera
+```
+
+Serial Monitor:
+
+```text
+Baud: 115200
+```
+
+Log dung:
+
+```text
+Demo hotspot connected.
+IP: 192.168.137.xxx
+MQTT TCP probe 192.168.137.1:1884 ... OK
+MQTT connected.
+Runtime ready
+```
+
+## 11. AI trong ban demo
+
+Mac dinh backend chay CPU:
+
+```text
+Detector: yolo11n.onnx
+imgsz: 320
+conf: 0.25
+VLM: tat mac dinh de stream on dinh
+```
+
+Trong UI:
+
+```text
+Video raw    xem camera goc
+AI overlay   xem stream co bbox detector
+Detect       detect mot frame
+VLM          hoi dap tren frame hien tai neu bat VLM/model da tai
+Tai model    preload model dang chon
+Ap dung      cap nhat model/imgsz/conf/interval
+```
+
+Luu y:
+
+```text
+yolo11n.onnx trong repo export input 320, nen khong chon imgsz 416 cho model nay.
+VLM lan dau co the rat lau vi phai tai model.
+Neu CPU yeu, dung Video raw khi lai robot, chi bam Detect khi can nhan dang.
+```
+
+## 12. Firewall Windows
+
+Neu dien thoai khong mo duoc dashboard hoac ESP khong vao MQTT, mo PowerShell Run as Administrator:
+
+```powershell
+New-NetFirewallRule -DisplayName "VisionBot MQTT 1884" -Direction Inbound -Protocol TCP -LocalPort 1884 -Action Allow
+New-NetFirewallRule -DisplayName "VisionBot Backend 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+New-NetFirewallRule -DisplayName "VisionBot Frontend 5173" -Direction Inbound -Protocol TCP -LocalPort 5173 -Action Allow
+```
+
+Kiem tra tren Windows:
+
+```powershell
+Test-NetConnection 192.168.137.1 -Port 1884
+```
+
+## 13. Loi thuong gap
+
+### Docker compose khong co MQTT port 1884
+
+Kiem tra:
+
+```bash
+docker compose ps
+```
+
+Can thay:
+
+```text
+0.0.0.0:1884->1883/tcp
+0.0.0.0:8000->8000/tcp
+0.0.0.0:5173->80/tcp
+```
+
+### Backend bao mqtt_connected false
+
+Chay:
+
+```bash
+docker compose logs --tail 80 backend
+docker compose logs --tail 80 mqtt
+```
+
+Backend phai co:
+
+```text
+[MQTT] connected to mqtt:1883
+```
+
+### Robot offline
+
+Kiem tra theo thu tu:
+
+```text
+1. Hotspot Windows co dung VisionBot-LAN / visionbot123 khong
+2. ESP serial co IP 192.168.137.xxx khong
+3. ESP serial co MQTT probe 192.168.137.1:1884 OK khong
+4. docker compose ps co expose 1884 khong
+5. Firewall Windows co chan port 1884 khong
+```
+
+### Dien thoai vao dashboard nhung khong stream
+
+Kiem tra trong serial ESP:
+
+```text
+Camera stream URL: ws://192.168.137.xxx:86/
+```
+
+Dien thoai phai ket noi vao hotspot `VisionBot-LAN`. Neu dien thoai dung 4G/ Wi-Fi khac se khong thay ESP.
+
+### YOLO bao Got 416 Expected 320
+
+Dung preset `YOLO realtime` hoac `YOLO can bang` trong ban moi. Ca hai da ep `yolo11n.onnx` ve `imgsz=320`.
+
+### VLM bao thieu num2words
+
+Ban Dockerfile/requirements moi da them:
+
+```text
+num2words>=0.5.13
+```
+
+Build lai backend:
+
+```bash
+docker compose build backend
+docker compose up -d backend
+```
+
+## 14. File huong dan phu
+
+```text
+LOCAL_LAN_COMPOSE_GUIDE.md  huong dan Docker Compose LAN chi tiet
+QUICK_WSL_MQTT_DEMO.md      cach chay thu cong tung service, chi de tham khao
+```
+
+## 15. Cau lenh nho nhanh
+
+Moi lan thi/demo:
+
+```bash
+cd ~/visionbot/VisionBot-main
+docker compose up -d
+```
+
+Mo tren dien thoai:
+
+```text
+http://192.168.137.1:5173
+```
+
+Dung:
+
+```bash
+docker compose down
+```
