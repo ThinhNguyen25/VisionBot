@@ -1,0 +1,36 @@
+# Python
+backend/.venv/
+backend/.venvBTL/
+__pycache__/
+*.pyc
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Backend env
+backend/.env
+.env
+
+# Broker secrets / runtime data
+broker/passwords
+broker/data/
+broker/log/
+broker/certs/*
+!broker/certs/.gitkeep
+
+# AI models / weights
+backend/models/
+backend/*.pt
+backend/*.onnx
+*.pt
+*.onnx
+*.safetensors
+*.bin
+*.gguf
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
