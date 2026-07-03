@@ -26,8 +26,8 @@
 
   Demo note:
     This build targets a portable LAN demo. Set Windows Mobile Hotspot to:
-      SSID: VisionBot-LAN
-      Password: visionbot123
+      SSID: ThinhVip
+      Password: Thinh123
     Windows hotspot normally gives the laptop IP 192.168.137.1.
     ESP uses external MQTT port 1884, mapped by Docker to broker port 1883.
 */
@@ -55,14 +55,14 @@
 
 // ================= FIRMWARE =================
 #define FW_NAME    "visionbot-esp32cam"
-#define FW_VERSION "1.2.1-compose-hotspot-port1884"
+#define FW_VERSION "1.2.2-thinhvip-hotspot-port1884"
 
 // ================= PORTABLE LAN DEMO DEFAULTS =================
 // Set Windows Mobile Hotspot to these exact values for a no-portal demo.
 // If the hotspot is unavailable, firmware falls back to the WiFiManager portal.
 #define VISIONBOT_DEMO_WIFI_ENABLE 1
-#define VISIONBOT_DEMO_WIFI_SSID "VisionBot-LAN"
-#define VISIONBOT_DEMO_WIFI_PASS "visionbot123"
+#define VISIONBOT_DEMO_WIFI_SSID "ThinhVip"
+#define VISIONBOT_DEMO_WIFI_PASS "Thinh123"
 #define VISIONBOT_DEMO_MQTT_HOST "192.168.137.1"
 #define VISIONBOT_DEMO_MQTT_PORT 1884
 
@@ -631,7 +631,7 @@ bool runConfigPortal(bool forcePortal, const String &reason) {
 bool connectDemoHotspot() {
 #if VISIONBOT_DEMO_WIFI_ENABLE
   Serial.println();
-  Serial.println("=== Portable LAN demo Wi-Fi ===");
+  Serial.println("=== Hardcoded laptop hotspot Wi-Fi ===");
   Serial.print("Trying SSID: ");
   Serial.println(VISIONBOT_DEMO_WIFI_SSID);
   Serial.print("MQTT broker default: ");
@@ -644,7 +644,7 @@ bool connectDemoHotspot() {
   WiFi.begin(VISIONBOT_DEMO_WIFI_SSID, VISIONBOT_DEMO_WIFI_PASS);
 
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 45000) {
     Serial.print(".");
     delay(500);
   }
@@ -652,14 +652,14 @@ bool connectDemoHotspot() {
 
   if (WiFi.status() == WL_CONNECTED) {
     loadDeviceConfig();
-    Serial.println("Demo hotspot connected.");
+    Serial.println("Hardcoded hotspot connected.");
     Serial.println("Wi-Fi sleep disabled for lower camera-stream latency.");
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
     return true;
   }
 
-  Serial.println("Demo hotspot not found. Falling back to setup portal.");
+  Serial.println("Hardcoded hotspot not found. Falling back to setup portal.");
 #endif
   return false;
 }
@@ -1476,7 +1476,7 @@ void setupPins() {
 void printBootInfo() {
   Serial.println();
   Serial.println("======================================");
-  Serial.println(" VisionBot ESP32-CAM Firmware v1.2.1 Compose Hotspot Port 1884");
+  Serial.println(" VisionBot ESP32-CAM Firmware v1.2.2 ThinhVip Hotspot Port 1884");
   Serial.println("======================================");
   Serial.print("Device ID: ");
   Serial.println(deviceId);

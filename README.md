@@ -12,7 +12,7 @@ Phone/Laptop browser
               -> ESP32-CAM robot
 
 ESP32-CAM
-  -> Wi-Fi hotspot: VisionBot-LAN
+  -> Wi-Fi hotspot: ThinhVip
   -> MQTT: 192.168.137.1:1884
   -> Camera WebSocket: ws://<ESP-IP>:86/
 ```
@@ -24,23 +24,23 @@ Khong con MQTTS/cert cho ban demo nay. MQTT la plain TCP trong mang local/hotspo
 Bat Windows Mobile Hotspot:
 
 ```text
-SSID: VisionBot-LAN
-Password: visionbot123
+SSID: ThinhVip
+Password: Thinh123
 Laptop hotspot IP thuong la: 192.168.137.1
 ```
 
 Firmware ESP32-CAM ban demo da mac dinh:
 
 ```text
-Wi-Fi SSID: VisionBot-LAN
-Wi-Fi password: visionbot123
+Wi-Fi SSID: ThinhVip
+Wi-Fi password: Thinh123
 MQTT host: 192.168.137.1
 MQTT external port: 1884
 MQTT username/password: de trong
 Device ID: VB-CAM-E9BFB4
 ```
 
-Neu ESP32-CAM cua ban da nap firmware `v1.2.1-compose-hotspot-port1884` va serial log da hien `MQTT connected`, thi khong can nap lai code moi lan chay.
+Neu ESP32-CAM cua ban da nap firmware `v1.2.2-thinhvip-hotspot-port1884` va serial log da hien `MQTT connected`, thi khong can nap lai code moi lan chay.
 
 ## 3. Can cai gi tren may moi
 
@@ -113,7 +113,7 @@ Tren laptop:
 http://localhost:5173
 ```
 
-Tren dien thoai hoac may khac dang noi vao hotspot `VisionBot-LAN`:
+Tren dien thoai hoac may khac dang noi vao hotspot `ThinhVip`:
 
 ```text
 http://192.168.137.1:5173
@@ -131,7 +131,7 @@ Frontend tu tinh backend theo host dang mo, nen khong can sua `frontend/.env` kh
 
 1. Bat Docker Desktop.
 2. Bat Windows Mobile Hotspot:
-   `VisionBot-LAN` / `visionbot123`.
+   `ThinhVip` / `Thinh123`.
 3. Cam nguon ESP32-CAM.
 4. Chay:
 
@@ -206,8 +206,8 @@ docker compose down -v
 Khong can nap lai neu ESP dang co ban demo:
 
 ```text
-Firmware: v1.2.1-compose-hotspot-port1884
-Wi-Fi: VisionBot-LAN
+Firmware: v1.2.2-thinhvip-hotspot-port1884
+Wi-Fi: ThinhVip
 MQTT: 192.168.137.1:1884
 ```
 
@@ -216,7 +216,7 @@ Chi nap lai khi:
 ```text
 ESP dang la firmware MQTTS cu
 ESP dang tro ve MQTT port 1883/8883 sai voi Docker Compose moi
-ESP khong tu vao VisionBot-LAN
+ESP khong tu vao ThinhVip
 Muon doi ten Wi-Fi/password/hardware pin
 ```
 
@@ -336,7 +336,7 @@ Backend phai co:
 Kiem tra theo thu tu:
 
 ```text
-1. Hotspot Windows co dung VisionBot-LAN / visionbot123 khong
+1. Hotspot Windows co dung ThinhVip / Thinh123 khong
 2. ESP serial co IP 192.168.137.xxx khong
 3. ESP serial co MQTT probe 192.168.137.1:1884 OK khong
 4. docker compose ps co expose 1884 khong
@@ -351,7 +351,7 @@ Kiem tra trong serial ESP:
 Camera stream URL: ws://192.168.137.xxx:86/
 ```
 
-Dien thoai phai ket noi vao hotspot `VisionBot-LAN`. Neu dien thoai dung 4G/ Wi-Fi khac se khong thay ESP.
+Dien thoai phai ket noi vao hotspot `ThinhVip`. Neu dien thoai dung 4G/ Wi-Fi khac se khong thay ESP.
 
 ### YOLO bao Got 416 Expected 320
 
