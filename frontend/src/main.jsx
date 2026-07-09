@@ -718,6 +718,11 @@ function App() {
     await stopVoice()
   }
 
+  const toggleMicAndVoice = async () => {
+    if (voiceListening) return stopMicAndVoice()
+    return toggleVoiceListening()
+  }
+
   const pill = (state, text) => {
     const cls = state === true ? 'ok' : (state === false ? 'bad' : state)
     return <span className={`pill ${cls}`}>{text}</span>
@@ -776,8 +781,7 @@ function App() {
           <button className={videoOn ? 'softDanger' : 'primary'} onClick={toggleVideoStream} title="Bật/tắt video stream từ ESP32-CAM">{videoOn ? <PauseCircle size={18}/> : <Play size={18}/>} {videoOn ? 'Tắt stream' : 'Bật stream'}</button>
           <button onClick={setModeManual} title="Đưa robot về manual, thoát estop để được phép điều khiển"><Gamepad2 size={18}/> Manual mode</button>
           <button className="danger" onClick={estop} title="Dừng khẩn cấp, robot vào estop. Muốn chạy lại phải bấm Manual mode"><ShieldAlert size={18}/> Dừng khẩn cấp</button>
-          <button className={voiceListening ? 'selected' : ''} onClick={toggleVoiceListening}><Mic size={18}/> Bật mic</button>
-          <button className="softDanger" onClick={stopMicAndVoice}><Mic size={18}/> Tắt mic</button>
+          <button className={voiceListening ? 'softDanger' : ''} onClick={toggleMicAndVoice}><Mic size={18}/> {voiceListening ? 'Tắt mic' : 'Bật mic'}</button>
         </section>
       </div>
     </header>
