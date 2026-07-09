@@ -820,9 +820,6 @@ function App() {
             <div>
               <Sparkles size={17}/>
               <b>Realtime VLM</b>
-              <button className={videoOn ? 'vlmToggleBtn softDanger' : 'vlmToggleBtn primary'} onClick={toggleVideoStream}>
-                {videoOn ? 'Tắt stream' : 'Bật stream'}
-              </button>
               <button className={vlmLive?.running ? 'vlmToggleBtn softDanger' : 'vlmToggleBtn primary'} onClick={vlmLive?.running ? stopVlmLive : startVlmLive} disabled={aiBusy}>
                 {vlmLive?.running ? 'Tắt VLM' : 'Bật VLM'}
               </button>
