@@ -1,401 +1,375 @@
-# VisionBot AI/IoT Dashboard
+# VisionBot AIoT
 
-VisionBot la robot ESP32-CAM dung dashboard React, backend FastAPI AI, MQTT broker Mosquitto va Docker Compose de chay local LAN. Ban hien tai uu tien demo nhanh, on dinh, mang di may nao cung chay duoc neu laptop phat hotspot co dinh.
+VisionBot la robot AIoT dung ESP32-CAM, MQTT control, camera WebSocket push/relay, backend FastAPI AI va frontend React.
 
-## 1. Ban nay chay nhu the nao
+Ban nay bam VisionBot System Design Specification v1.0, uu tien P0:
+
+- MQTT command co ACK, TTL 300-500ms, khong retain command nguy hiem.
+- ESP32-CAM/robot mat Wi-Fi/MQTT/backend thi retry voi backoff, khong reset/AP mode lien tuc.
+- Backend giu latest-frame buffer, drop frame cu, khong xep hang AI lam lag.
+- Dashboard hien ro backend/MQTT/robot/camera state machine, retry, stale/offline.
+- VLM mac dinh dung llama-server OpenAI-compatible cho SmolVLM GGUF; backend khong bi treo neu VLM chua chay.
+
+Kien truc ho tro 3 che do:
 
 ```text
-Phone/Laptop browser
-  -> Frontend dashboard: http://192.168.137.1:5173
-      -> Backend FastAPI + AI: http://192.168.137.1:8000
-          -> MQTT broker trong Docker: external 1884 -> internal 1883
-              -> ESP32-CAM robot
+1. Local LAN fallback
+   ESP32-CAM -> ws://ESP:86 -> Backend pull -> Frontend
+   Frontend -> Backend -> local MQTT -> ESP32-CAM
 
+2. Backend direct camera push
+   ESP32-CAM -> ws(s)://<backend-domain>/ws/camera/<device_id> -> Backend latest frame
+   Frontend -> Backend -> MQTT -> ESP32-CAM
+
+3. Internet relay/VPS mode
+   ESP32-CAM -> Camera Relay WSS -> Backend subscribe -> Frontend
+   Frontend -> Backend -> MQTT cloud/VPS -> ESP32-CAM
+```
+
+## 1. Kien truc Internet mode
+
+```text
+Camera:
 ESP32-CAM
-  -> Wi-Fi hotspot: ThinhVip
-  -> MQTT: 192.168.137.1:1884
-  -> Camera WebSocket: ws://<ESP-IP>:86/
+  -> wss://<domain>/camera/ws/push/<device_id>
+  -> camera-relay
+  -> backend subscribe frame
+  -> frontend xem MJPEG tu backend
+
+Control:
+frontend
+  -> backend FastAPI
+  -> MQTT broker cloud/VPS
+  -> ESP32-CAM motor/servo
+
+AI:
+backend nhan JPEG frame
+  -> YOLO / VLM
+  -> frontend hien thi result
 ```
 
-Khong con MQTTS/cert cho ban demo nay. MQTT la plain TCP trong mang local/hotspot rieng de giam loi khi doi Wi-Fi, doi IP laptop.
+ESP32-CAM khong can biet IP laptop. Laptop/backend khong can biet IP ESP.
 
-## 2. Cau hinh co dinh de dem di demo
-
-Bat Windows Mobile Hotspot:
+## 2. Thanh phan chinh
 
 ```text
-SSID: ThinhVip
-Password: Thinh123
-Laptop hotspot IP thuong la: 192.168.137.1
+backend/       FastAPI, MQTT client, camera frame buffer, YOLO/VLM
+camera-relay/  WebSocket binary JPEG relay, giu latest frame, drop frame cu
+frontend/      React dashboard
+firmware/      ESP32-CAM firmware LAN va Internet Push
+deploy/vps/    Mosquitto + camera-relay + Caddy cho VPS
+broker/        Mosquitto local fallback
+scripts/       Script cai/chay WSL
 ```
 
-Firmware ESP32-CAM ban demo da mac dinh:
+## 3. Chay nhanh Local LAN
 
-```text
-Wi-Fi SSID: ThinhVip
-Wi-Fi password: Thinh123
-MQTT host: 192.168.137.1
-MQTT external port: 1884
-MQTT username/password: de trong
-Device ID: VB-CAM-E9BFB4
-```
-
-Neu ESP32-CAM cua ban da nap firmware `v1.2.2-thinhvip-hotspot-port1884` va serial log da hien `MQTT connected`, thi khong can nap lai code moi lan chay.
-
-## 3. Can cai gi tren may moi
-
-Tren Windows:
-
-```text
-Docker Desktop
-Ubuntu WSL2
-Git
-Chrome/Edge
-Arduino IDE chi can neu phai nap lai ESP32-CAM
-```
-
-Trong Ubuntu WSL:
+Terminal 1 - MQTT local:
 
 ```bash
-sudo apt update
-sudo apt install -y git curl unzip ca-certificates
-```
-
-Docker Desktop can bat WSL Integration cho distro Ubuntu dang dung.
-
-## 4. Lay project tu GitHub
-
-Trong WSL:
-
-```bash
-mkdir -p ~/visionbot
-cd ~/visionbot
-git clone https://github.com/ThinhNguyen25/VisionBot.git VisionBot-main
-cd VisionBot-main
-```
-
-Neu da clone roi va muon cap nhat ban moi:
-
-```bash
-cd ~/visionbot/VisionBot-main
-git pull
-```
-
-## 5. Chay toan bo he thong bang mot lenh
-
-Bat Docker Desktop truoc, sau do trong WSL:
-
-```bash
-cd ~/visionbot/VisionBot-main
-docker compose up -d --build
-docker compose ps
-```
-
-Lenh nay bat cung luc:
-
-```text
-visionbot-mqtt       Mosquitto MQTT broker, port ngoai 1884
-visionbot-backend    FastAPI + AI, port 8000
-visionbot-frontend   Dashboard, port 5173
-```
-
-Lan dau can internet de tai Docker image, Python packages va Node packages. Nhung lan sau co the chay nhanh hon:
-
-```bash
+cd ~/visionbot/VisionBot-main/broker
 docker compose up -d
+docker logs -f visionbot-mosquitto
 ```
 
-## 6. Mo giao dien dieu khien
+Terminal 2 - Backend:
 
-Tren laptop:
+```bash
+cd ~/visionbot/VisionBot-main
+bash scripts/install_backend_wsl.sh
+bash scripts/run_backend_wsl_cpu.sh
+```
+
+Terminal 3 - Frontend:
+
+```bash
+cd ~/visionbot/VisionBot-main
+bash scripts/install_frontend_wsl.sh
+bash scripts/run_frontend_wsl.sh
+```
+
+Mo dashboard:
+
+```text
+http://localhost:5173
+http://<ip-laptop>:5173
+```
+
+Firmware LAN fallback:
+
+```text
+firmware/VisionBot_ESP32CAM_MQTT1883/VisionBot_ESP32CAM_MQTT1883.ino
+```
+
+Trong setup portal ESP dien Wi-Fi, MQTT host la IP laptop trong cung mang, MQTT port 1883.
+
+## 4. Internet / Cloudflare Tunnel
+
+Cloudflare Tunnel free expose duoc HTTPS/WSS cho backend/camera, nhung khong expose MQTT TCP 1883. Vi vay MQTT nen dung VPS Mosquitto hoac broker cloud rieng.
+
+### 4.1 Direct backend push qua Cloudflare
+
+Chay backend tren laptop:
+
+```bash
+cd ~/visionbot/VisionBot-main
+MQTT_HOST=<mqtt-cloud-or-vps-host> \
+MQTT_PORT=1883 \
+CAMERA_PUSH_TOKEN=demo_camera \
+bash scripts/run_backend_wsl_cpu.sh
+```
+
+PowerShell mo tunnel backend:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+cloudflared tunnel --url http://localhost:8000
+```
+
+Copy URL dang:
+
+```text
+https://abc.trycloudflare.com
+```
+
+Trong firmware Internet Push dien:
+
+```text
+Camera push host/domain: abc.trycloudflare.com
+Camera push port: 443
+Camera push TLS: 1
+Camera push token: demo_camera
+Camera push path: /ws/camera   (mac dinh backend cung chap nhan /camera/ws/push)
+MQTT broker host/IP: <mqtt-cloud-or-vps-host>
+MQTT broker port: 1883
+```
+
+Backend nhan frame tai:
+
+```text
+wss://abc.trycloudflare.com/ws/camera/<device_id>?token=demo_camera
+```
+
+### 4.2 Camera relay rieng
+
+Chay camera relay tren laptop:
+
+```bash
+cd ~/visionbot/VisionBot-main
+bash scripts/install_camera_relay_wsl.sh
+CAMERA_TOKEN=demo_camera BACKEND_TOKEN=demo_backend bash scripts/run_camera_relay_wsl.sh
+```
+
+Tunnel relay:
+
+```powershell
+cloudflared tunnel --url http://localhost:8001
+```
+
+Backend ket noi relay:
+
+```bash
+MQTT_HOST=<mqtt-cloud-or-vps-host> \
+MQTT_PORT=1883 \
+CAMERA_RELAY_WS='wss://abc.trycloudflare.com/camera/ws/subscribe/{device_id}' \
+CAMERA_RELAY_TOKEN=demo_backend \
+bash scripts/run_backend_wsl_cpu.sh
+```
+
+Public broker chi nen dung demo. Ban on dinh nen dung VPS Mosquitto rieng.
+
+Frontend:
+
+```bash
+cd ~/visionbot/VisionBot-main
+bash scripts/install_frontend_wsl.sh
+bash scripts/run_frontend_wsl.sh
+```
+
+Mo:
 
 ```text
 http://localhost:5173
 ```
 
-Tren dien thoai hoac may khac dang noi vao hotspot `ThinhVip`:
+## 5. Firmware ESP32-CAM Internet Push
+
+File:
 
 ```text
-http://192.168.137.1:5173
+firmware/VisionBot_ESP32CAM_INTERNET_PUSH/VisionBot_ESP32CAM_INTERNET_PUSH.ino
 ```
 
-Backend health:
+Trong Arduino IDE:
 
 ```text
-http://192.168.137.1:8000/api/health
+Board: AI Thinker ESP32-CAM
+Partition: Huge APP
+PSRAM: Enabled
+Upload speed: 115200
 ```
 
-Frontend tu tinh backend theo host dang mo, nen khong can sua `frontend/.env` khi xem tren dien thoai.
-
-## 7. Trinh tu demo nhanh
-
-1. Bat Docker Desktop.
-2. Bat Windows Mobile Hotspot:
-   `ThinhVip` / `Thinh123`.
-3. Cam nguon ESP32-CAM.
-4. Chay:
-
-```bash
-cd ~/visionbot/VisionBot-main
-docker compose up -d --build
-```
-
-5. Mo:
+Sau khi nap, vao setup portal ESP va dien:
 
 ```text
-http://192.168.137.1:5173
+Wi-Fi SSID/password: Wi-Fi bat ky co Internet
+MQTT broker host/IP: broker cloud/VPS
+MQTT broker port: 1883
+MQTT username/password: neu co
+Camera push/relay host/domain: abc.trycloudflare.com
+Camera relay port: 443
+Camera relay TLS: 1
+Camera relay token: demo_camera
 ```
 
-6. Trong UI bam `Lam moi`, thay MQTT OK va Robot online la co the lai.
-
-## 8. Kiem tra log khi co loi
-
-Xem cac container:
-
-```bash
-docker compose ps
-```
-
-Xem MQTT:
-
-```bash
-docker compose logs -f mqtt
-```
-
-Khi ESP ket noi dung, log se co dong gan giong:
+Serial dung se co:
 
 ```text
-New client connected ... as VB-CAM-E9BFB4
-```
-
-Xem backend:
-
-```bash
-docker compose logs -f backend
-```
-
-Test API:
-
-```bash
-curl http://localhost:8000/api/health
-curl http://localhost:8000/api/robots
-```
-
-Nghe MQTT topic truc tiep:
-
-```bash
-docker exec -it visionbot-mqtt mosquitto_sub -h localhost -p 1883 -t 'visionbot/#' -v
-```
-
-## 9. Dung he thong
-
-Dung container nhung giu volume/cache:
-
-```bash
-docker compose down
-```
-
-Xoa sach volume MQTT/model cache de lam lai tu dau:
-
-```bash
-docker compose down -v
-```
-
-## 10. Nap ESP32-CAM khi nao
-
-Khong can nap lai neu ESP dang co ban demo:
-
-```text
-Firmware: v1.2.2-thinhvip-hotspot-port1884
-Wi-Fi: ThinhVip
-MQTT: 192.168.137.1:1884
-```
-
-Chi nap lai khi:
-
-```text
-ESP dang la firmware MQTTS cu
-ESP dang tro ve MQTT port 1883/8883 sai voi Docker Compose moi
-ESP khong tu vao ThinhVip
-Muon doi ten Wi-Fi/password/hardware pin
-```
-
-File firmware:
-
-```text
-firmware/VisionBot_ESP32CAM/VisionBot_ESP32CAM.ino
-```
-
-Arduino libraries can co:
-
-```text
-WiFiManager
-PubSubClient
-WebSockets
-ArduinoJson
-ESP32 board package co esp32-camera
-```
-
-Serial Monitor:
-
-```text
-Baud: 115200
-```
-
-Log dung:
-
-```text
-Demo hotspot connected.
-IP: 192.168.137.xxx
-MQTT TCP probe 192.168.137.1:1884 ... OK
+[CAM PUSH] relay URL: wss://abc.trycloudflare.com:443/camera/ws/push/<device_id>?token=...
+[CAM PUSH] connected to backend relay.
 MQTT connected.
-Runtime ready
 ```
 
-## 11. AI trong ban demo
+## 6. SmolVLM GGUF qua llama-server
 
-Mac dinh backend chay CPU:
+Backend mac dinh ho tro SmolVLM GGUF qua OpenAI-compatible API:
 
 ```text
-Detector: yolo11n.onnx
-imgsz: 320
-conf: 0.25
-VLM: tat mac dinh de stream on dinh
+AI_VLM_PROVIDER=llama_server
+AI_VLM_MODEL=ggml-org/SmolVLM-500M-Instruct-GGUF
+AI_VLM_OPENAI_BASE_URL=http://127.0.0.1:8080
+AI_VLM_TIMEOUT_S=25
 ```
 
-Trong UI:
+Chay llama-server rieng theo repo SmolVLM realtime/GGUF cua ban, expose:
 
 ```text
-Video raw    xem camera goc
-AI overlay   xem stream co bbox detector
-Detect       detect mot frame
-VLM          hoi dap tren frame hien tai neu bat VLM/model da tai
-Tai model    preload model dang chon
-Ap dung      cap nhat model/imgsz/conf/interval
+http://127.0.0.1:8080/v1/chat/completions
 ```
 
-Luu y:
+Neu dung Docker backend, `docker-compose.yml` da dat:
 
 ```text
-yolo11n.onnx trong repo export input 320, nen khong chon imgsz 416 cho model nay.
-VLM lan dau co the rat lau vi phai tai model.
-Neu CPU yeu, dung Video raw khi lai robot, chi bam Detect khi can nhan dang.
+AI_VLM_OPENAI_BASE_URL=http://host.docker.internal:8080
 ```
 
-## 12. Firewall Windows
+Neu VLM chua chay, dashboard van stream/detect duoc; VLM chat se bao `llama_server_unavailable` ro rang va lan sau van retry.
 
-Neu dien thoai khong mo duoc dashboard hoac ESP khong vao MQTT, mo PowerShell Run as Administrator:
+## 7. VPS deployment chuan
 
-```powershell
-New-NetFirewallRule -DisplayName "VisionBot MQTT 1884" -Direction Inbound -Protocol TCP -LocalPort 1884 -Action Allow
-New-NetFirewallRule -DisplayName "VisionBot Backend 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
-New-NetFirewallRule -DisplayName "VisionBot Frontend 5173" -Direction Inbound -Protocol TCP -LocalPort 5173 -Action Allow
-```
-
-Kiem tra tren Windows:
-
-```powershell
-Test-NetConnection 192.168.137.1 -Port 1884
-```
-
-## 13. Loi thuong gap
-
-### Docker compose khong co MQTT port 1884
-
-Kiem tra:
+Copy repo len VPS, vao:
 
 ```bash
-docker compose ps
+cd deploy/vps
+cp .env.example .env
 ```
 
-Can thay:
+Tao MQTT users:
 
-```text
-0.0.0.0:1884->1883/tcp
-0.0.0.0:8000->8000/tcp
-0.0.0.0:5173->80/tcp
+```bash
+docker run --rm -it -v "$PWD/mosquitto/config:/mosquitto/config" eclipse-mosquitto:2 \
+  mosquitto_passwd -c /mosquitto/config/passwd backend_user
+docker run --rm -it -v "$PWD/mosquitto/config:/mosquitto/config" eclipse-mosquitto:2 \
+  mosquitto_passwd /mosquitto/config/passwd robot01_user
 ```
 
-### Backend bao mqtt_connected false
+Sua `.env`:
+
+```env
+VISIONBOT_DOMAIN=your-domain.example.com
+CAMERA_TOKEN=change_camera_token
+BACKEND_TOKEN=change_backend_token
+```
 
 Chay:
 
 ```bash
-docker compose logs --tail 80 backend
-docker compose logs --tail 80 mqtt
+docker compose up -d --build
+docker compose logs -f
 ```
 
-Backend phai co:
-
-```text
-[MQTT] connected to mqtt:1883
-```
-
-### Robot offline
-
-Kiem tra theo thu tu:
-
-```text
-1. Hotspot Windows co dung ThinhVip / Thinh123 khong
-2. ESP serial co IP 192.168.137.xxx khong
-3. ESP serial co MQTT probe 192.168.137.1:1884 OK khong
-4. docker compose ps co expose 1884 khong
-5. Firewall Windows co chan port 1884 khong
-```
-
-### Dien thoai vao dashboard nhung khong stream
-
-Kiem tra trong serial ESP:
-
-```text
-Camera stream URL: ws://192.168.137.xxx:86/
-```
-
-Dien thoai phai ket noi vao hotspot `ThinhVip`. Neu dien thoai dung 4G/ Wi-Fi khac se khong thay ESP.
-
-### YOLO bao Got 416 Expected 320
-
-Dung preset `YOLO realtime` hoac `YOLO can bang` trong ban moi. Ca hai da ep `yolo11n.onnx` ve `imgsz=320`.
-
-### VLM bao thieu num2words
-
-Ban Dockerfile/requirements moi da them:
-
-```text
-num2words>=0.5.13
-```
-
-Build lai backend:
+Health:
 
 ```bash
-docker compose build backend
-docker compose up -d backend
+curl https://your-domain.example.com/camera/health
 ```
 
-## 14. File huong dan phu
+Backend tren laptop/server:
 
-```text
-LOCAL_LAN_COMPOSE_GUIDE.md  huong dan Docker Compose LAN chi tiet
-QUICK_WSL_MQTT_DEMO.md      cach chay thu cong tung service, chi de tham khao
+```bash
+MQTT_HOST=your-domain.example.com \
+MQTT_PORT=1883 \
+MQTT_USERNAME=backend_user \
+MQTT_PASSWORD='password' \
+CAMERA_RELAY_WS='wss://your-domain.example.com/camera/ws/subscribe/{device_id}' \
+CAMERA_RELAY_TOKEN='change_backend_token' \
+bash scripts/run_backend_wsl_cpu.sh
 ```
 
-## 15. Cau lenh nho nhanh
+## 8. Docker Compose local
 
-Moi lan thi/demo:
+Chay full stack local:
 
 ```bash
 cd ~/visionbot/VisionBot-main
-docker compose up -d
+docker compose up -d --build
+docker compose ps
 ```
 
-Mo tren dien thoai:
+Mac dinh compose mo:
 
 ```text
-http://192.168.137.1:5173
+Frontend: http://localhost:5173
+Backend:  http://localhost:8000
+MQTT:     localhost:1884 -> container 1883
+Relay:    http://localhost:8001/camera/health
 ```
 
-Dung:
+Neu firmware dang dung MQTT port 1883 thi chay broker rieng trong `broker/` thay vi full compose, hoac sua firmware MQTT port thanh 1884.
+
+## 9. Debug nhanh
+
+MQTT:
 
 ```bash
-docker compose down
+mosquitto_sub -h <mqtt-host> -p 1883 -t 'visionbot/#' -v
 ```
+
+Relay:
+
+```bash
+curl https://<relay-domain>/camera/health
+```
+
+Backend:
+
+```bash
+curl http://localhost:8000/api/health
+curl http://localhost:8000/api/robots
+curl http://localhost:8000/api/robots/<device_id>/ai/status
+```
+
+Camera push direct:
+
+```text
+ws://<backend-ip>:8000/ws/camera/<device_id>
+wss://<cloudflare-domain>/ws/camera/<device_id>?token=<CAMERA_PUSH_TOKEN>
+```
+
+Camera session can co:
+
+```json
+{
+  "running": true,
+  "connected": true,
+  "frame_count": 10
+}
+```
+
+## 10. Safety
+
+- Motor command co TTL/duration, ESP tu stop khi qua han.
+- ESP stop motor khi mat Wi-Fi/MQTT, nhung service loi thi retry backoff, khong reset/AP loop.
+- Backend validate command va cho ack.
+- Emergency stop luon uu tien.
+- Camera stream khong di qua MQTT.

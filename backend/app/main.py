@@ -1,14 +1,18 @@
 import json
 import os
+import re
 import threading
 import time
 from io import BytesIO
 from pathlib import Path
 import shutil
+import base64
 from collections import deque
 from typing import Any, Generator
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -16,7 +20,7 @@ import paho.mqtt.client as mqtt
 import websocket
 
 
-APP_VERSION = "1.2.0-local-lan-compose"
+APP_VERSION = "1.3.0-sds-p0"
 
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
@@ -25,6 +29,11 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 BASE_TOPIC = os.getenv("MQTT_BASE_TOPIC", "visionbot")
 COMMAND_ACK_TIMEOUT_S = float(os.getenv("COMMAND_ACK_TIMEOUT_S", "3.0"))
 COMMAND_ACK_OK_STATUSES = {"accepted", "executed", "ok"}
+ROBOT_OFFLINE_TIMEOUT_MS = int(os.getenv("ROBOT_OFFLINE_TIMEOUT_MS", "5000"))
+CAMERA_STALE_MS = int(os.getenv("CAMERA_STALE_MS", "2000"))
+CAMERA_OFFLINE_MS = int(os.getenv("CAMERA_OFFLINE_MS", "5000"))
+CAMERA_MAX_FRAME_BYTES = int(os.getenv("CAMERA_MAX_FRAME_BYTES", "250000"))
+BACKOFF_SCHEDULE_S = [1, 2, 5, 10, 20, 30]
 
 AI_ENABLE_YOLO = os.getenv("AI_ENABLE_YOLO", "1") == "1"
 AI_YOLO_MODEL = os.getenv("AI_YOLO_MODEL", "yolo11n.onnx")
@@ -32,10 +41,16 @@ AI_CONF_THRESHOLD = float(os.getenv("AI_CONF_THRESHOLD", "0.25"))
 AI_YOLO_IMGSZ = int(os.getenv("AI_YOLO_IMGSZ", "320"))
 AI_DETECT_INTERVAL_S = float(os.getenv("AI_DETECT_INTERVAL_S", "0.20"))
 AI_ENABLE_VLM = os.getenv("AI_ENABLE_VLM", "1") == "1"
-AI_VLM_MODEL = os.getenv("AI_VLM_MODEL", "HuggingFaceTB/SmolVLM-500M-Instruct")
-AI_VLM_MAX_NEW_TOKENS = int(os.getenv("AI_VLM_MAX_NEW_TOKENS", "140"))
+AI_VLM_MODEL = os.getenv("AI_VLM_MODEL", "ggml-org/SmolVLM-500M-Instruct-GGUF")
+AI_VLM_MAX_NEW_TOKENS = int(os.getenv("AI_VLM_MAX_NEW_TOKENS", "48"))
+AI_VLM_PROVIDER = os.getenv("AI_VLM_PROVIDER", "llama_server").strip().lower()
+AI_VLM_OPENAI_BASE_URL = os.getenv("AI_VLM_OPENAI_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+AI_VLM_TIMEOUT_S = float(os.getenv("AI_VLM_TIMEOUT_S", "25"))
 AI_MODEL_DIR = Path(os.getenv("AI_MODEL_DIR", "models"))
 AI_DEVICE = os.getenv("AI_DEVICE", "auto").strip().lower()  # auto/cpu/cuda
+CAMERA_RELAY_WS = os.getenv("CAMERA_RELAY_WS", "").strip()
+CAMERA_RELAY_TOKEN = os.getenv("CAMERA_RELAY_TOKEN", "").strip()
+CAMERA_PUSH_TOKEN = os.getenv("CAMERA_PUSH_TOKEN", "").strip()
 
 DETECTOR_PRESETS = [
     # Keep this list intentionally small and stable. Heavy/non-realtime models caused
@@ -46,6 +61,7 @@ DETECTOR_PRESETS = [
     {"id": "torchvision:ssdlite320_mobilenet_v3_large", "label": "SSD MobileNetV3 320 — không YOLO", "family": "ssd_mobilenet", "speed": "fast", "recommended_imgsz": 320, "note": "detector deep-learning khác YOLO, bbox COCO, CPU"},
 ]
 VLM_PRESETS = [
+    {"id": "ggml-org/SmolVLM-500M-Instruct-GGUF", "label": "SmolVLM 500M GGUF — llama-server", "params": "0.5B", "bbox": "không trực tiếp"},
     {"id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "label": "SmolVLM2 500M — nhẹ nhất", "params": "0.5B", "bbox": "không trực tiếp"},
     {"id": "HuggingFaceTB/SmolVLM-500M-Instruct", "label": "SmolVLM 500M — ổn định", "params": "0.5B", "bbox": "không trực tiếp"},
 ]
@@ -63,6 +79,18 @@ app.add_middleware(
 robots: dict[str, dict[str, Any]] = {}
 events: list[dict[str, Any]] = []
 mqtt_connected = False
+mqtt_state_lock = threading.Lock()
+mqtt_state: dict[str, Any] = {
+    "state": "starting",
+    "connected": False,
+    "host": MQTT_HOST,
+    "port": MQTT_PORT,
+    "attempts": 0,
+    "reconnect_delay_s": 0,
+    "last_connect_ms": None,
+    "last_disconnect_ms": None,
+    "last_error": None,
+}
 
 ack_lock = threading.Lock()
 pending_cmd_acks: dict[tuple[str, int], dict[str, Any]] = {}
@@ -71,6 +99,37 @@ latest_cmd_acks: dict[str, list[dict[str, Any]]] = {}
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def backoff_delay(attempt: int) -> int:
+    return BACKOFF_SCHEDULE_S[min(max(attempt, 0), len(BACKOFF_SCHEDULE_S) - 1)]
+
+
+def set_mqtt_state(state: str, *, connected: bool | None = None, error: str | None = None, reconnect_delay_s: int | None = None) -> None:
+    with mqtt_state_lock:
+        mqtt_state["state"] = state
+        if connected is not None:
+            mqtt_state["connected"] = connected
+        if reconnect_delay_s is not None:
+            mqtt_state["reconnect_delay_s"] = reconnect_delay_s
+        if error is not None:
+            mqtt_state["last_error"] = error
+        if connected is True:
+            mqtt_state["last_connect_ms"] = now_ms()
+            mqtt_state["last_error"] = None
+            mqtt_state["reconnect_delay_s"] = 0
+        elif connected is False:
+            mqtt_state["last_disconnect_ms"] = now_ms()
+
+
+def mqtt_state_snapshot() -> dict[str, Any]:
+    with mqtt_state_lock:
+        snap = dict(mqtt_state)
+    if snap.get("last_connect_ms"):
+        snap["last_connect_age_ms"] = now_ms() - int(snap["last_connect_ms"])
+    if snap.get("last_disconnect_ms"):
+        snap["last_disconnect_age_ms"] = now_ms() - int(snap["last_disconnect_ms"])
+    return snap
 
 
 COMMAND_SEQ_MAX = 2_147_483_647
@@ -129,9 +188,16 @@ class CameraSession:
         self.latest_jpeg: bytes | None = None
         self.latest_frame_ms: int | None = None
         self.frame_count = 0
+        self.dropped_frames = 0
         self.frame_times_ms: deque[int] = deque(maxlen=180)
         self.last_error: str | None = None
         self.connected = False
+        self.state = "idle"
+        self.source = "none"
+        self.connection_attempts = 0
+        self.reconnect_delay_s = 0
+        self.last_connect_ms: int | None = None
+        self.last_disconnect_ms: int | None = None
         self.lock = threading.Lock()
 
     def _fps_locked(self) -> float:
@@ -145,13 +211,31 @@ class CameraSession:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             size = len(self.latest_jpeg) if self.latest_jpeg else 0
+            age = None if self.latest_frame_ms is None else now_ms() - self.latest_frame_ms
+            if age is None:
+                camera_status = "no_frame"
+            elif age <= CAMERA_STALE_MS:
+                camera_status = "online"
+            elif age <= CAMERA_OFFLINE_MS:
+                camera_status = "stale"
+            else:
+                camera_status = "offline"
             return {
                 "running": self.running,
                 "connected": self.connected,
+                "state": self.state,
+                "source": self.source,
+                "camera_status": camera_status,
+                "connection_attempts": self.connection_attempts,
+                "reconnect_delay_s": self.reconnect_delay_s,
+                "last_connect_ms": self.last_connect_ms,
+                "last_disconnect_ms": self.last_disconnect_ms,
                 "frame_count": self.frame_count,
+                "latest_frame_seq": self.frame_count,
+                "dropped_frames": self.dropped_frames,
                 "stream_fps": self._fps_locked(),
                 "latest_frame_ms": self.latest_frame_ms,
-                "latest_frame_age_ms": None if self.latest_frame_ms is None else now_ms() - self.latest_frame_ms,
+                "latest_frame_age_ms": age,
                 "latest_frame_size_bytes": size,
                 "latest_frame_kb": round(size / 1024.0, 1) if size else 0,
                 "last_error": self.last_error,
@@ -161,7 +245,39 @@ class CameraSession:
         with self.lock:
             return self.latest_jpeg
 
-    def set_frame(self, data: bytes) -> None:
+    def mark_connecting(self, source: str, reconnect_delay_s: int = 0) -> None:
+        with self.lock:
+            self.state = "connecting"
+            self.source = source
+            self.connected = False
+            self.connection_attempts += 1
+            self.reconnect_delay_s = reconnect_delay_s
+
+    def mark_connected(self, source: str) -> None:
+        with self.lock:
+            self.state = "connected"
+            self.source = source
+            self.connected = True
+            self.reconnect_delay_s = 0
+            self.last_connect_ms = now_ms()
+            self.last_error = None
+
+    def mark_disconnected(self, source: str, error: str | None = None, reconnect_delay_s: int = 0) -> None:
+        with self.lock:
+            self.state = "backoff" if reconnect_delay_s else "disconnected"
+            self.source = source
+            self.connected = False
+            self.reconnect_delay_s = reconnect_delay_s
+            self.last_disconnect_ms = now_ms()
+            if error:
+                self.last_error = error
+
+    def set_frame(self, data: bytes, source: str = "unknown") -> bool:
+        if len(data) > CAMERA_MAX_FRAME_BYTES:
+            with self.lock:
+                self.dropped_frames += 1
+                self.last_error = f"frame_too_large:{len(data)}>{CAMERA_MAX_FRAME_BYTES}"
+            return False
         t = now_ms()
         with self.lock:
             self.latest_jpeg = data
@@ -169,18 +285,30 @@ class CameraSession:
             self.frame_count += 1
             self.frame_times_ms.append(t)
             self.connected = True
+            self.state = "streaming"
+            self.source = source
             self.last_error = None
+        return True
 
-    def set_error(self, error: str) -> None:
+    def set_error(self, error: str, state: str = "error", reconnect_delay_s: int = 0) -> None:
         with self.lock:
             self.last_error = error
             self.connected = False
+            self.state = state
+            self.reconnect_delay_s = reconnect_delay_s
 
     def stop(self) -> None:
         self.running = False
+        with self.lock:
+            self.connected = False
+            self.state = "stopped"
+            self.reconnect_delay_s = 0
 
 
 camera_sessions: dict[str, CameraSession] = {}
+runtime_lock = threading.Lock()
+vlm_streams: dict[str, dict[str, Any]] = {}
+voice_latches: dict[str, dict[str, Any]] = {}
 
 
 class DriveCommand(BaseModel):
@@ -188,7 +316,7 @@ class DriveCommand(BaseModel):
     cmd: str | None = None
     left: float | None = None
     right: float | None = None
-    ttl_ms: int = 900
+    ttl_ms: int = 500
     mode: str = "manual"
 
     @field_validator("seq", mode="before")
@@ -199,8 +327,8 @@ class DriveCommand(BaseModel):
     @field_validator("ttl_ms")
     @classmethod
     def _ttl_bounds(cls, value: int) -> int:
-        # Frontend sends keep-alive every ~300ms. TTL is the safety net.
-        return max(150, min(int(value), 2000))
+        # SDS P0 deadman switch: robot must stop if command stream is stale.
+        return max(300, min(int(value), 500))
 
 
 class ServoCommand(BaseModel):
@@ -235,6 +363,20 @@ class AIConfigUpdate(BaseModel):
 
 class AIAskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=600)
+
+
+class VLMStreamStartRequest(BaseModel):
+    instruction: str = Field("Phía trước là gì? Hãy mô tả ngắn gọn và đưa ra lời khuyên an toàn cho robot.", min_length=1, max_length=600)
+    interval_ms: int = 1500
+
+    @field_validator("interval_ms")
+    @classmethod
+    def _interval_bounds(cls, value: int) -> int:
+        return max(500, min(int(value), 10000))
+
+
+class VoiceCommandRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=300)
 
 
 def topic_for(device_id: str, suffix: str) -> str:
@@ -336,6 +478,7 @@ def publish_command_and_wait_robot_ack(device_id: str, command_name: str, topic:
         seq = 0
     if seq <= 0:
         raise HTTPException(status_code=400, detail={"error": "missing_command_seq", "payload": payload})
+    assert_robot_command_allowed(device_id, command_name)
 
     pending_key, ack_event = register_pending_cmd_ack(device_id, seq)
     try:
@@ -367,6 +510,7 @@ def safe_json(payload: bytes) -> dict[str, Any]:
 def upsert_robot(device_id: str, data: dict[str, Any], kind: str) -> None:
     r = robots.setdefault(device_id, {"device_id": device_id, "online": False, "state": {}, "telemetry": {}, "events": [], "last_seen_ms": None})
     r["last_seen_ms"] = now_ms()
+    r["last_message_kind"] = kind
     if kind == "state":
         r["state"] = data
         r["online"] = bool(data.get("online", True))
@@ -386,6 +530,11 @@ def upsert_robot(device_id: str, data: dict[str, Any], kind: str) -> None:
             r["camera_ready"] = camera["ready"]
         if "mqtt_connected" in network:
             r["mqtt_connected"] = network["mqtt_connected"]
+    elif kind == "heartbeat":
+        r["heartbeat"] = data
+        r["online"] = True
+        if "mqtt_connected" in data:
+            r["mqtt_connected"] = bool(data.get("mqtt_connected"))
     elif kind == "event":
         r["events"].append(data)
         r["events"] = r["events"][-100:]
@@ -393,20 +542,74 @@ def upsert_robot(device_id: str, data: dict[str, Any], kind: str) -> None:
         del events[:-500]
 
 
+def upsert_camera_presence(device_id: str, session: CameraSession) -> None:
+    snap = session.snapshot()
+    r = robots.setdefault(device_id, {"device_id": device_id, "online": False, "state": {}, "telemetry": {}, "events": [], "last_seen_ms": None})
+    r["last_seen_ms"] = now_ms()
+    r["last_message_kind"] = "camera_frame"
+    r["online"] = True
+    r["camera_ready"] = True
+    r["camera_session"] = snap
+    state = r.setdefault("state", {})
+    state["camera_ready"] = True
+    state["camera_status"] = snap.get("camera_status")
+    state["camera_source"] = snap.get("source")
+    state["camera_frame_count"] = snap.get("frame_count")
+    state["latest_frame_age_ms"] = snap.get("latest_frame_age_ms")
+
+
+def refresh_robot_liveness() -> None:
+    now = now_ms()
+    for robot in robots.values():
+        last_seen = robot.get("last_seen_ms")
+        if last_seen is None:
+            robot["online"] = False
+            robot["liveness"] = "no_heartbeat"
+            robot["last_seen_age_ms"] = None
+            continue
+        age = now - int(last_seen)
+        robot["last_seen_age_ms"] = age
+        if age > ROBOT_OFFLINE_TIMEOUT_MS:
+            robot["online"] = False
+            robot["liveness"] = "offline"
+        else:
+            robot["liveness"] = "online" if robot.get("online", True) else "reported_offline"
+        session = camera_sessions.get(str(robot.get("device_id") or ""))
+        if session:
+            robot["camera_session"] = session.snapshot()
+
+
+def assert_robot_command_allowed(device_id: str, command_name: str) -> None:
+    refresh_robot_liveness()
+    robot = robots.get(device_id)
+    if robot is None:
+        raise HTTPException(status_code=404, detail={"error": "robot_not_found", "device_id": device_id})
+    if command_name == "stop":
+        return
+    if not robot.get("online"):
+        raise HTTPException(status_code=409, detail={"error": "robot_offline", "device_id": device_id, "last_seen_age_ms": robot.get("last_seen_age_ms"), "message": "Robot is offline/stale, command was not sent."})
+    if robot.get("mqtt_connected") is False:
+        raise HTTPException(status_code=409, detail={"error": "robot_mqtt_offline", "device_id": device_id, "message": "Robot reports MQTT offline, command was not sent."})
+
+
 def on_connect(client: mqtt.Client, userdata, flags, reason_code, properties=None):
     global mqtt_connected
     mqtt_connected = True
+    set_mqtt_state("connected", connected=True)
     client.subscribe(f"{BASE_TOPIC}/+/state", qos=1)
+    client.subscribe(f"{BASE_TOPIC}/+/heartbeat", qos=0)
     client.subscribe(f"{BASE_TOPIC}/+/telemetry", qos=0)
     client.subscribe(f"{BASE_TOPIC}/+/event", qos=0)
     client.subscribe(f"{BASE_TOPIC}/+/cmd_ack", qos=1)
+    client.publish(f"{BASE_TOPIC}/backend/status", json.dumps({"online": True, "state": "ready", "ts_ms": now_ms()}), qos=1, retain=True)
     print(f"[MQTT] connected to {MQTT_HOST}:{MQTT_PORT}")
-    print(f"[MQTT] subscribed {BASE_TOPIC}/+/state telemetry event cmd_ack")
+    print(f"[MQTT] subscribed {BASE_TOPIC}/+/state heartbeat telemetry event cmd_ack")
 
 
 def on_disconnect(client: mqtt.Client, userdata, reason_code, properties=None):
     global mqtt_connected
     mqtt_connected = False
+    set_mqtt_state("disconnected", connected=False, error=str(reason_code))
     print(f"[MQTT] disconnected: {reason_code}")
 
 
@@ -420,7 +623,7 @@ def on_message(client: mqtt.Client, userdata, msg: mqtt.MQTTMessage):
     if isinstance(data, dict):
         data["_topic"] = msg.topic
         data["_received_ms"] = now_ms()
-    if kind in {"state", "telemetry", "event"}:
+    if kind in {"state", "heartbeat", "telemetry", "event"}:
         upsert_robot(device_id, data, kind)
         print(f"[MQTT] {kind} from {device_id}")
     elif kind == "cmd_ack":
@@ -437,35 +640,76 @@ mqtt_client.on_message = on_message
 
 
 def mqtt_loop():
+    attempt = 0
     while True:
         try:
+            delay = backoff_delay(attempt)
+            with mqtt_state_lock:
+                mqtt_state["attempts"] = attempt + 1
+            set_mqtt_state("connecting", connected=False, reconnect_delay_s=0)
+            print(f"[MQTT] connecting to {MQTT_HOST}:{MQTT_PORT} attempt={attempt + 1}")
             mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
             mqtt_client.loop_forever()
+            attempt = 0
         except Exception as e:
-            print(f"[MQTT] connect/loop error: {e}")
-            time.sleep(3)
+            delay = backoff_delay(attempt)
+            set_mqtt_state("reconnecting", connected=False, error=str(e), reconnect_delay_s=delay)
+            print(f"[MQTT] connect/loop error: {e}; retry in {delay}s")
+            time.sleep(delay)
+            attempt += 1
+
+
+def camera_relay_subscribe_url(device_id: str) -> str | None:
+    if not CAMERA_RELAY_WS:
+        return None
+    encoded_device = quote(device_id, safe="")
+    base = CAMERA_RELAY_WS.strip()
+    if "{device_id}" in base:
+        url = base.format(device_id=encoded_device)
+    elif base.endswith("/camera/ws/subscribe"):
+        url = f"{base}/{encoded_device}"
+    elif base.endswith("/"):
+        url = f"{base}camera/ws/subscribe/{encoded_device}"
+    else:
+        url = base
+    if CAMERA_RELAY_TOKEN and "token=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}{urlencode({'token': CAMERA_RELAY_TOKEN})}"
+    return url
 
 
 def camera_loop(session: CameraSession) -> None:
     print(f"[CAM] receiver thread started: {session.device_id}")
     ws = None
+    attempt = 0
     while session.running:
+        relay_url = camera_relay_subscribe_url(session.device_id)
         robot = robots.get(session.device_id)
-        stream_url = robot.get("stream_url") if robot else None
+        stream_url = relay_url or (robot.get("stream_url") if robot else None)
+        source = "relay_subscribe" if relay_url else "lan_ws_pull"
         if not stream_url:
-            session.set_error("missing_stream_url")
-            time.sleep(1)
+            delay = backoff_delay(attempt)
+            session.set_error("missing_stream_url", state="backoff", reconnect_delay_s=delay)
+            print(f"[CAM] missing stream url for {session.device_id}; retry in {delay}s")
+            time.sleep(delay)
+            attempt += 1
             continue
         try:
+            session.mark_connecting(source)
             print(f"[CAM] connecting {session.device_id}: {stream_url}")
-            ws = websocket.create_connection(stream_url, timeout=5)
+            ws = websocket.create_connection(stream_url, timeout=10)
+            session.mark_connected(source)
+            attempt = 0
             while session.running:
                 data = ws.recv()
                 if isinstance(data, bytes) and data[:2] == b"\xff\xd8":
-                    session.set_frame(data)
+                    session.set_frame(data, source=source)
         except Exception as e:
-            session.set_error(str(e))
-            time.sleep(1)
+            delay = backoff_delay(attempt)
+            session.mark_disconnected(source, error=str(e), reconnect_delay_s=delay)
+            print(f"[CAM] {source} error for {session.device_id}: {e}; retry in {delay}s")
+            time.sleep(delay)
+            attempt += 1
         finally:
             try:
                 if ws:
@@ -482,7 +726,7 @@ def get_camera_session(device_id: str) -> CameraSession:
 
 
 def start_camera_session(device_id: str) -> CameraSession:
-    if device_id not in robots:
+    if device_id not in robots and device_id not in camera_sessions and not CAMERA_RELAY_WS:
         raise HTTPException(status_code=404, detail="robot_not_found")
     session = get_camera_session(device_id)
     if session.running:
@@ -491,6 +735,39 @@ def start_camera_session(device_id: str) -> CameraSession:
     session.thread = threading.Thread(target=camera_loop, args=(session,), daemon=True)
     session.thread.start()
     return session
+
+
+def camera_push_token_ok(token: str | None) -> bool:
+    return not CAMERA_PUSH_TOKEN or token == CAMERA_PUSH_TOKEN
+
+
+async def accept_camera_push(websocket: WebSocket, device_id: str, source: str, token: str | None = None) -> None:
+    if not camera_push_token_ok(token):
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    session = get_camera_session(device_id)
+    session.running = True
+    session.mark_connected(source)
+    upsert_camera_presence(device_id, session)
+    print(f"[CAM PUSH] connected: {device_id} source={source}")
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            if data[:2] == b"\xff\xd8":
+                ok = session.set_frame(data, source=source)
+                if ok:
+                    upsert_camera_presence(device_id, session)
+                else:
+                    print(f"[CAM PUSH] dropped frame from {device_id}: {len(data)} bytes")
+    except WebSocketDisconnect:
+        print(f"[CAM PUSH] disconnected: {device_id} source={source}")
+    except Exception as exc:
+        session.set_error(str(exc), state="error")
+        print(f"[CAM PUSH] error {device_id}: {exc}")
+    finally:
+        session.mark_disconnected(source, error="push_ws_disconnected")
 
 
 def mjpeg_generator(device_id: str) -> Generator[bytes, None, None]:
@@ -937,6 +1214,10 @@ class VisionAI:
         return buf.tobytes() if ok else jpeg
 
     def _load_vlm(self):
+        if AI_VLM_PROVIDER in {"llama", "llama_server", "openai"}:
+            self.vlm_family = "llama_server"
+            self.vlm_loaded = True
+            return
         if self.vlm_loaded or self.vlm_error:
             return
         try:
@@ -967,11 +1248,88 @@ class VisionAI:
         except Exception as exc:
             self.vlm_error = str(exc)
 
+    def _analyze_scene_llama_server(self, jpeg: bytes, question: str | None = None, detector_labels: set[str] | None = None) -> dict[str, Any]:
+        image_b64 = base64.b64encode(jpeg).decode("ascii")
+        prompt = _robot_chat_prompt(question)
+        payload = {
+            "model": AI_VLM_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                    ],
+                }
+            ],
+            "max_tokens": AI_VLM_MAX_NEW_TOKENS,
+            "temperature": 0,
+        }
+        url = f"{AI_VLM_OPENAI_BASE_URL}/v1/chat/completions"
+        t0 = time.perf_counter()
+        try:
+            req = Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=AI_VLM_TIMEOUT_S) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            self.vlm_error = f"llama_server_unavailable: {exc}"
+            return {
+                "enabled": True,
+                "model": AI_VLM_MODEL,
+                "family": "llama_server",
+                "provider": AI_VLM_PROVIDER,
+                "base_url": AI_VLM_OPENAI_BASE_URL,
+                "timeout_s": AI_VLM_TIMEOUT_S,
+                "error": self.vlm_error,
+            }
+
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        content = ""
+        try:
+            content = body["choices"][0]["message"]["content"]
+        except Exception:
+            content = json.dumps(body, ensure_ascii=False)[:1200]
+        answer = _clean_vlm_text(content)
+        path_status = _pick_label(answer, ["clear", "crowded", "blocked", "uncertain"], default="uncertain", priority=["blocked", "crowded", "uncertain", "clear"])
+        action = _pick_label(answer, ["go", "slow_down", "stop", "turn", "speed_up"], default="slow_down", priority=["stop", "turn", "slow_down", "go", "speed_up"])
+        action = _normalize_robot_action(path_status, action, answer, detector_labels=detector_labels)
+        created = now_ms()
+        metric_key = _model_metric_key("vlm", AI_VLM_MODEL)
+        with self.lock:
+            self.vlm_error = None
+            self.vlm_loaded = True
+            self.vlm_family = "llama_server"
+            self.vlm_latency_ms.append(latency_ms)
+            self.last_vlm_ms = latency_ms
+            self.last_vlm_created_ms = created
+            metric = dict(_update_metric(self.vlm_metrics, metric_key, latency_ms, extra={"model": AI_VLM_MODEL, "family": "llama_server", "path_status": path_status, "action": action}))
+        return {
+            "enabled": True,
+            "model": AI_VLM_MODEL,
+            "family": "llama_server",
+            "provider": AI_VLM_PROVIDER,
+            "base_url": AI_VLM_OPENAI_BASE_URL,
+            "raw": content,
+            "answer_vi": answer,
+            "path_status": path_status,
+            "action": action,
+            "inference_ms": latency_ms,
+            "inference_fps": round(1000.0 / latency_ms, 2) if latency_ms > 0 else 0.0,
+            "metric_key": metric_key,
+            "model_metric": metric,
+            "created_ms": created,
+        }
+
     def _vlm_generate_text(self, image, prompt: str, max_new_tokens: int | None = None) -> tuple[str, float]:
         import torch
 
         img = image.convert("RGB")
-        img.thumbnail((512, 384))
+        img.thumbnail((384, 288))
         messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
         text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
         inputs = self.processor(text=text, images=[img], return_tensors="pt")
@@ -996,6 +1354,8 @@ class VisionAI:
         if not AI_ENABLE_VLM:
             return {"enabled": False, "error": "AI_ENABLE_VLM=0. Set AI_ENABLE_VLM=1 to enable VLM."}
         self._load_vlm()
+        if self.vlm_family == "llama_server":
+            return self._analyze_scene_llama_server(jpeg, question=question, detector_labels=detector_labels)
         if self.vlm_error:
             return {"enabled": True, "model": AI_VLM_MODEL, "error": self.vlm_error}
         try:
@@ -1063,28 +1423,17 @@ class VisionAI:
                 return {"enabled": True, "model": AI_VLM_MODEL, "family": self.vlm_family, "raw": raw, "parsed": parsed, "detections": detections, "detections_count": len(detections), "answer_vi": answer, "inference_ms": latency_ms, "inference_fps": round(1000.0 / latency_ms, 2) if latency_ms > 0 else 0.0, "metric_key": metric_key, "model_metric": metric, "created_ms": created}
 
             caption_prompt = (
-                "Look at the image from a small robot front camera. "
-                "Describe what is visible ahead in one short natural Vietnamese sentence. "
-                "Mention the main scene, objects, people, vehicles, or obstacles. "
-                "Do not give advice. Do not use JSON."
-            )
-            path_prompt = (
-                "Look at the robot front-camera image. For a robot moving forward, choose the path status. "
-                "Answer only one word: clear, crowded, blocked, uncertain."
-            )
-            action_prompt = (
-                "Look at the robot front-camera image. What should the robot do next? "
-                "Answer only one action: go, slow_down, stop, turn, speed_up."
+                "You are the vision assistant for a small robot front camera. "
+                "Answer in Vietnamese, short and natural. Say what is visible ahead, "
+                "whether the path looks clear/crowded/blocked/uncertain, and one safe action "
+                "for the robot such as go, slow_down, stop, or turn. Do not use JSON."
             )
             if question:
                 caption_prompt += f" User question context: {question[:500]}"
 
-            raw_caption, caption_ms = self._vlm_generate_text(image, caption_prompt, max_new_tokens=70)
-            raw_path, path_ms = self._vlm_generate_text(image, path_prompt, max_new_tokens=12)
-            raw_action, action_ms = self._vlm_generate_text(image, action_prompt, max_new_tokens=12)
-            latency_ms = round(caption_ms + path_ms + action_ms, 1)
-            path_status = _pick_label(raw_path, ["clear", "crowded", "blocked", "uncertain"], default="uncertain", priority=["blocked", "crowded", "uncertain", "clear"])
-            action = _pick_label(raw_action, ["go", "slow_down", "stop", "turn", "speed_up"], default="slow_down", priority=["stop", "turn", "slow_down", "go", "speed_up"])
+            raw_caption, latency_ms = self._vlm_generate_text(image, caption_prompt, max_new_tokens=min(AI_VLM_MAX_NEW_TOKENS, 48))
+            path_status = _pick_label(raw_caption, ["clear", "crowded", "blocked", "uncertain"], default="uncertain", priority=["blocked", "crowded", "uncertain", "clear"])
+            action = _pick_label(raw_caption, ["go", "slow_down", "stop", "turn", "speed_up"], default="slow_down", priority=["stop", "turn", "slow_down", "go", "speed_up"])
             action = _normalize_robot_action(path_status, action, raw_caption, detector_labels=detector_labels)
             answer = _build_robot_answer_vi(raw_caption, path_status, action, question=question)
             raw = raw_caption
@@ -1097,13 +1446,9 @@ class VisionAI:
                 metric = dict(_update_metric(self.vlm_metrics, metric_key, latency_ms, extra={"model": AI_VLM_MODEL, "family": self.vlm_family, "path_status": path_status, "action": action}))
             debug = {
                 "raw_caption": raw_caption,
-                "raw_path": raw_path,
-                "raw_action": raw_action,
                 "path_status": path_status,
                 "action": action,
-                "caption_ms": caption_ms,
-                "path_ms": path_ms,
-                "action_ms": action_ms,
+                "caption_ms": latency_ms,
                 "has_vehicle": _caption_has_vehicle(raw_caption),
                 "has_person": _caption_has_person(raw_caption),
                 "has_obstacle": _caption_has_obstacle(raw_caption),
@@ -1234,6 +1579,9 @@ class VisionAI:
                 "vlm": {
                     "enabled": AI_ENABLE_VLM,
                     "model": AI_VLM_MODEL,
+                    "provider": AI_VLM_PROVIDER,
+                    "openai_base_url": AI_VLM_OPENAI_BASE_URL if AI_VLM_PROVIDER in {"llama", "llama_server", "openai"} else None,
+                    "timeout_s": AI_VLM_TIMEOUT_S,
                     "loaded": self.vlm_loaded,
                     "error": self.vlm_error,
                     "last_inference_ms": self.last_vlm_ms,
@@ -1270,6 +1618,191 @@ def ai_mjpeg_generator(device_id: str) -> Generator[bytes, None, None]:
             time.sleep(0.03)
 
 
+def build_ai_scene_result(device_id: str, frame: bytes, question: str | None = None, force_detect: bool = False) -> dict[str, Any]:
+    detections = vision_ai.detect(frame, force=force_detect)
+    dets = detections.get("detections", []) if isinstance(detections, dict) else []
+    detector_labels = {d.get("label", "").lower() for d in dets}
+    vlm_question = question
+    if question:
+        det_summary = ", ".join([f"{d.get('label')} {d.get('confidence')}" for d in dets[:8]]) or "không có detection rõ từ detector realtime"
+        vlm_question = f"Detector realtime đang thấy: {det_summary}. Người dùng hỏi: {question}"
+    scene = vision_ai.analyze_scene(frame, question=vlm_question, detector_labels=detector_labels)
+    labels = set(detector_labels)
+    labels |= {d.get("label", "").lower() for d in scene.get("detections", [])} if isinstance(scene, dict) else set()
+    risky = bool(labels & {"person", "car", "truck", "bus", "motorcycle", "bicycle", "dog", "cat", "chair", "bench"})
+    safe_action = scene.get("action") if isinstance(scene, dict) and scene.get("action") else ("slow_down" if risky else "go")
+    if risky and safe_action == "go":
+        safe_action = "slow_down"
+    safety = {"risk_detected": risky, "safe_action": safe_action, "rule": "detector/VLM risky label override" if risky else "VLM robot action"}
+    return {"device_id": device_id, "question": question, "answer": scene.get("answer_vi") if isinstance(scene, dict) else None, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
+
+
+def vlm_stream_loop(device_id: str) -> None:
+    while True:
+        with runtime_lock:
+            state = vlm_streams.get(device_id)
+            if not state or not state.get("running"):
+                return
+            instruction = state.get("instruction") or "Phía trước là gì? Hãy mô tả ngắn gọn và đưa ra lời khuyên an toàn cho robot."
+            interval_ms = int(state.get("interval_ms") or 1500)
+            state["state"] = "running"
+        try:
+            session = start_camera_session(device_id)
+            frame = session.latest_frame()
+            if frame is None:
+                raise RuntimeError("no_camera_frame")
+            result = build_ai_scene_result(device_id, frame, question=instruction, force_detect=False)
+            with runtime_lock:
+                state = vlm_streams.get(device_id)
+                if state:
+                    state["last_result"] = result
+                    state["last_answer"] = result.get("answer")
+                    state["last_safety"] = result.get("safety")
+                    state["last_error"] = None
+                    state["last_created_ms"] = now_ms()
+                    state["run_count"] = int(state.get("run_count") or 0) + 1
+        except Exception as exc:
+            with runtime_lock:
+                state = vlm_streams.get(device_id)
+                if state:
+                    state["last_error"] = str(exc)
+                    state["last_created_ms"] = now_ms()
+        time.sleep(max(0.5, interval_ms / 1000.0))
+
+
+def vlm_stream_snapshot(device_id: str) -> dict[str, Any]:
+    with runtime_lock:
+        state = dict(vlm_streams.get(device_id) or {"running": False, "state": "stopped"})
+    created = state.get("last_created_ms")
+    state["last_age_ms"] = None if created is None else now_ms() - int(created)
+    return state
+
+
+def _extract_voice_duration_s(t: str) -> float | None:
+    m = re.search(r"(\d+(?:[,.]\d+)?)\s*(?:s|sec|secs|second|seconds|giay|giây)", t)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1).replace(",", "."))
+    except Exception:
+        return None
+    return max(0.5, min(10.0, value))
+
+
+def parse_voice_intent(text: str) -> dict[str, Any]:
+    t = " ".join(str(text or "").lower().strip().split())
+    if not t:
+        return {"intent": "unknown", "action": None}
+    if any(x in t for x in ["dừng", "dung", "stop", "đứng lại", "dừng lại", "thôi", "ngừng"]):
+        return {"intent": "stop", "action": "stop", "duration_s": 0}
+
+    duration_s = _extract_voice_duration_s(t)
+    if duration_s is None:
+        return {
+            "intent": "duration_required",
+            "action": None,
+            "message": "Hãy nói kèm thời lượng, ví dụ: 'tiến 5 giây', 'lùi 3 giây', 'trái 2 giây'.",
+        }
+
+    if any(x in t for x in ["tiến", "tien", "đi thẳng", "di thang", "thẳng", "forward"]):
+        return {"intent": "drive", "action": "forward", "duration_s": duration_s}
+    if any(x in t for x in ["lùi", "lui", "back", "backward"]):
+        return {"intent": "drive", "action": "backward", "duration_s": duration_s}
+    if any(x in t for x in ["trái", "trai", "rẽ trái", "re trai", "left"]):
+        return {"intent": "drive", "action": "left", "duration_s": duration_s}
+    if any(x in t for x in ["phải", "phai", "rẽ phải", "re phai", "right"]):
+        return {"intent": "drive", "action": "right", "duration_s": duration_s}
+    if any(x in t for x in ["bật đèn", "bat den", "tắt đèn", "tat den"]):
+        return {"intent": "unsupported", "action": "light", "message": "Firmware hiện tại chưa có endpoint điều khiển đèn."}
+    return {"intent": "unknown", "action": None}
+
+
+def stop_voice_latch(device_id: str, reason: str = "voice_stop") -> None:
+    with runtime_lock:
+        state = voice_latches.setdefault(device_id, {})
+        state.update({
+            "running": False,
+            "desired_motion": "stop",
+            "state": "stopped",
+            "remaining_ms": 0,
+            "remaining_s": 0,
+            "end_ms": None,
+            "last_error": None,
+            "last_reason": reason,
+            "updated_ms": now_ms(),
+        })
+
+
+def voice_latch_loop(device_id: str) -> None:
+    while True:
+        with runtime_lock:
+            state = voice_latches.get(device_id)
+            if not state or not state.get("running"):
+                return
+            desired = state.get("desired_motion")
+            end_ms = int(state.get("end_ms") or 0)
+            remaining_ms = max(0, end_ms - now_ms()) if end_ms else 0
+            state["remaining_ms"] = remaining_ms
+            state["remaining_s"] = round(remaining_ms / 1000.0, 1)
+        if not desired or desired == "stop":
+            return
+        if remaining_ms <= 0:
+            try:
+                publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice_timed_done"}, qos=0, timeout_s=0.5)
+            except Exception:
+                pass
+            stop_voice_latch(device_id, reason="duration_done")
+            return
+        try:
+            assert_robot_command_allowed(device_id, "drive")
+            vlm_state = vlm_stream_snapshot(device_id)
+            safe_action = (vlm_state.get("last_safety") or {}).get("safe_action")
+            if desired == "forward" and safe_action == "stop":
+                publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice_safety"}, qos=0, timeout_s=0.5)
+                stop_voice_latch(device_id, reason="safety_stop")
+                return
+            publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": desired, "ttl_ms": 500, "mode": "manual", "source": "voice_timed"}, qos=0, timeout_s=0.5)
+            with runtime_lock:
+                state = voice_latches.get(device_id)
+                if state:
+                    state["state"] = "publishing"
+                    state["last_publish_ms"] = now_ms()
+                    end_ms = int(state.get("end_ms") or 0)
+                    remaining_ms = max(0, end_ms - now_ms()) if end_ms else 0
+                    state["remaining_ms"] = remaining_ms
+                    state["remaining_s"] = round(remaining_ms / 1000.0, 1)
+                    state["last_error"] = None
+        except Exception as exc:
+            with runtime_lock:
+                state = voice_latches.get(device_id)
+                if state:
+                    state["state"] = "error"
+                    state["running"] = False
+                    state["last_error"] = str(exc)
+                    state["updated_ms"] = now_ms()
+            try:
+                publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice_error_stop"}, qos=0, timeout_s=0.5)
+            except Exception:
+                pass
+            return
+        time.sleep(0.15)
+
+
+def voice_latch_snapshot(device_id: str) -> dict[str, Any]:
+    with runtime_lock:
+        state = dict(voice_latches.get(device_id) or {"running": False, "state": "stopped", "desired_motion": "stop", "remaining_ms": 0, "remaining_s": 0})
+    updated = state.get("updated_ms") or state.get("last_publish_ms")
+    state["age_ms"] = None if updated is None else now_ms() - int(updated)
+    if state.get("running") and state.get("end_ms"):
+        remaining_ms = max(0, int(state["end_ms"]) - now_ms())
+        state["remaining_ms"] = remaining_ms
+        state["remaining_s"] = round(remaining_ms / 1000.0, 1)
+    else:
+        state["remaining_ms"] = int(state.get("remaining_ms") or 0)
+        state["remaining_s"] = round(state["remaining_ms"] / 1000.0, 1)
+    return state
+
+
 @app.on_event("startup")
 def startup():
     threading.Thread(target=mqtt_loop, daemon=True).start()
@@ -1282,16 +1815,20 @@ def api_root():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": APP_VERSION, "mqtt_connected": mqtt_is_ready(), "mqtt_connected_flag": mqtt_connected, "mqtt_client_connected": mqtt_client.is_connected(), "mqtt_host": MQTT_HOST, "mqtt_port": MQTT_PORT, "robots": len(robots), "camera_sessions": {k: v.snapshot() for k, v in camera_sessions.items()}, "command_ack_timeout_s": COMMAND_ACK_TIMEOUT_S, "pending_command_acks": pending_command_ack_count(), "ai": {"yolo_enabled": AI_ENABLE_YOLO, "yolo_model": AI_YOLO_MODEL, "yolo_imgsz": AI_YOLO_IMGSZ, "vlm_enabled": AI_ENABLE_VLM, "vlm_model": AI_VLM_MODEL, "status": vision_ai.status()}}
+    refresh_robot_liveness()
+    mqtt_ready = mqtt_is_ready()
+    return {"ok": True, "version": APP_VERSION, "backend_status": "ready" if mqtt_ready else "degraded", "mqtt_connected": mqtt_ready, "mqtt_state": mqtt_state_snapshot(), "mqtt_connected_flag": mqtt_connected, "mqtt_client_connected": mqtt_client.is_connected(), "mqtt_host": MQTT_HOST, "mqtt_port": MQTT_PORT, "robots": len(robots), "camera_push": {"enabled": True, "endpoints": ["/ws/camera/{device_id}", "/camera/ws/push/{device_id}", "/api/robots/{device_id}/camera/push"], "token_required": bool(CAMERA_PUSH_TOKEN)}, "camera_relay_ws_configured": bool(CAMERA_RELAY_WS), "camera_stale_ms": CAMERA_STALE_MS, "camera_offline_ms": CAMERA_OFFLINE_MS, "robot_offline_timeout_ms": ROBOT_OFFLINE_TIMEOUT_MS, "camera_sessions": {k: v.snapshot() for k, v in camera_sessions.items()}, "command_ack_timeout_s": COMMAND_ACK_TIMEOUT_S, "pending_command_acks": pending_command_ack_count(), "ai": {"yolo_enabled": AI_ENABLE_YOLO, "yolo_model": AI_YOLO_MODEL, "yolo_imgsz": AI_YOLO_IMGSZ, "vlm_enabled": AI_ENABLE_VLM, "vlm_model": AI_VLM_MODEL, "vlm_provider": AI_VLM_PROVIDER, "status": vision_ai.status()}}
 
 
 @app.get("/api/robots")
 def list_robots():
-    return {"robots": list(robots.values()), "mqtt_connected": mqtt_is_ready()}
+    refresh_robot_liveness()
+    return {"robots": list(robots.values()), "mqtt_connected": mqtt_is_ready(), "mqtt_state": mqtt_state_snapshot()}
 
 
 @app.get("/api/robots/{device_id}")
 def get_robot(device_id: str):
+    refresh_robot_liveness()
     if device_id not in robots:
         raise HTTPException(status_code=404, detail="robot_not_found")
     data = dict(robots[device_id])
@@ -1306,6 +1843,21 @@ def start_camera(device_id: str):
     return {"ok": True, "device_id": device_id, "camera_session": session.snapshot()}
 
 
+@app.websocket("/ws/camera/{device_id}")
+async def camera_push_spec_ws(websocket: WebSocket, device_id: str, token: str | None = Query(default=None)):
+    await accept_camera_push(websocket, device_id, source="backend_push_ws", token=token)
+
+
+@app.websocket("/camera/ws/push/{device_id}")
+async def camera_push_relay_compatible_ws(websocket: WebSocket, device_id: str, token: str | None = Query(default=None)):
+    await accept_camera_push(websocket, device_id, source="backend_push_ws", token=token)
+
+
+@app.websocket("/api/robots/{device_id}/camera/push")
+async def camera_push_legacy_ws(websocket: WebSocket, device_id: str, token: str | None = Query(default=None)):
+    await accept_camera_push(websocket, device_id, source="backend_push_ws_legacy", token=token)
+
+
 @app.post("/api/robots/{device_id}/camera/stop")
 def stop_camera(device_id: str):
     session = get_camera_session(device_id)
@@ -1315,14 +1867,14 @@ def stop_camera(device_id: str):
 
 @app.get("/api/robots/{device_id}/video.mjpg")
 def video_mjpg(device_id: str):
-    if device_id not in robots:
+    if device_id not in robots and device_id not in camera_sessions and not CAMERA_RELAY_WS:
         raise HTTPException(status_code=404, detail="robot_not_found")
     return StreamingResponse(mjpeg_generator(device_id), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/robots/{device_id}/ai/video.mjpg")
 def ai_video_mjpg(device_id: str):
-    if device_id not in robots:
+    if device_id not in robots and device_id not in camera_sessions and not CAMERA_RELAY_WS:
         raise HTTPException(status_code=404, detail="robot_not_found")
     return StreamingResponse(ai_mjpeg_generator(device_id), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-cache"})
 
@@ -1401,22 +1953,104 @@ def ai_ask(device_id: str, req: AIAskRequest):
     return {"device_id": device_id, "question": req.question, "answer": scene.get("answer_vi") if isinstance(scene, dict) else None, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
 
 
+@app.post("/api/robots/{device_id}/ai/vlm-stream/start")
+def start_vlm_stream(device_id: str, req: VLMStreamStartRequest):
+    start_camera_session(device_id)
+    with runtime_lock:
+        state = vlm_streams.setdefault(device_id, {})
+        already_running = bool(state.get("running"))
+        state.update({
+            "running": True,
+            "state": "starting" if not already_running else "running",
+            "instruction": req.instruction,
+            "interval_ms": req.interval_ms,
+            "started_ms": state.get("started_ms") or now_ms(),
+            "last_error": None,
+        })
+    if not already_running:
+        threading.Thread(target=vlm_stream_loop, args=(device_id,), daemon=True).start()
+    return {"ok": True, "device_id": device_id, "vlm_stream": vlm_stream_snapshot(device_id)}
+
+
+@app.post("/api/robots/{device_id}/ai/vlm-stream/stop")
+def stop_vlm_stream(device_id: str):
+    with runtime_lock:
+        state = vlm_streams.setdefault(device_id, {})
+        state.update({"running": False, "state": "stopped", "stopped_ms": now_ms()})
+    return {"ok": True, "device_id": device_id, "vlm_stream": vlm_stream_snapshot(device_id)}
+
+
+@app.get("/api/robots/{device_id}/ai/vlm-stream/status")
+def get_vlm_stream(device_id: str):
+    return {"device_id": device_id, "vlm_stream": vlm_stream_snapshot(device_id)}
+
+
+@app.post("/api/robots/{device_id}/control/voice")
+def voice_command(device_id: str, req: VoiceCommandRequest):
+    intent = parse_voice_intent(req.text)
+    if intent["intent"] in {"unknown", "unsupported", "duration_required"}:
+        return {"ok": False, "device_id": device_id, "text": req.text, "intent": intent, "voice": voice_latch_snapshot(device_id)}
+    if intent["action"] == "stop":
+        stop_voice_latch(device_id, reason="voice_stop")
+        payload = {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice"}
+        result = publish_command_and_wait_robot_ack(device_id, "drive", topic_for(device_id, "cmd/drive"), payload, qos=0, ack_timeout_s=1.0)
+        return {"ok": True, "device_id": device_id, "text": req.text, "intent": intent, "voice": voice_latch_snapshot(device_id), "command": result}
+
+    desired = intent["action"]
+    duration_s = float(intent.get("duration_s") or 0)
+    started_ms = now_ms()
+    end_ms = started_ms + int(duration_s * 1000)
+    assert_robot_command_allowed(device_id, "drive")
+    with runtime_lock:
+        state = voice_latches.setdefault(device_id, {})
+        already_running = bool(state.get("running"))
+        state.update({
+            "running": True,
+            "state": "starting" if not already_running else "publishing",
+            "desired_motion": desired,
+            "duration_s": duration_s,
+            "started_ms": started_ms,
+            "end_ms": end_ms,
+            "remaining_ms": max(0, end_ms - now_ms()),
+            "remaining_s": round(max(0, end_ms - now_ms()) / 1000.0, 1),
+            "last_text": req.text,
+            "updated_ms": now_ms(),
+            "last_error": None,
+        })
+    if not already_running:
+        threading.Thread(target=voice_latch_loop, args=(device_id,), daemon=True).start()
+    return {"ok": True, "device_id": device_id, "text": req.text, "intent": intent, "voice": voice_latch_snapshot(device_id)}
+
+
+@app.post("/api/robots/{device_id}/control/voice/stop")
+def stop_voice_command(device_id: str):
+    stop_voice_latch(device_id, reason="api_stop")
+    payload = {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice_stop_api"}
+    result = publish_command_and_wait_robot_ack(device_id, "drive", topic_for(device_id, "cmd/drive"), payload, qos=0, ack_timeout_s=1.0)
+    return {"ok": True, "device_id": device_id, "voice": voice_latch_snapshot(device_id), "command": result}
+
+
+@app.get("/api/robots/{device_id}/control/voice/status")
+def get_voice_status(device_id: str):
+    return {"device_id": device_id, "voice": voice_latch_snapshot(device_id)}
+
+
 @app.post("/api/robots/{device_id}/control/drive")
 def drive(device_id: str, command: DriveCommand):
     payload = command.model_dump(exclude_none=True)
-    return publish_command_and_wait_robot_ack(device_id, "drive", topic_for(device_id, "cmd/drive"), payload, qos=1)
+    return publish_command_and_wait_robot_ack(device_id, "drive", topic_for(device_id, "cmd/drive"), payload, qos=0)
 
 
 @app.post("/api/robots/{device_id}/control/servo")
 def servo(device_id: str, command: ServoCommand):
     payload = command.model_dump()
-    return publish_command_and_wait_robot_ack(device_id, "servo", topic_for(device_id, "cmd/servo"), payload, qos=1)
+    return publish_command_and_wait_robot_ack(device_id, "servo", topic_for(device_id, "cmd/servo"), payload, qos=0)
 
 
 @app.post("/api/robots/{device_id}/control/stop")
 def stop(device_id: str, command: StopCommand):
     payload = command.model_dump()
-    return publish_command_and_wait_robot_ack(device_id, "stop", topic_for(device_id, "cmd/stop"), payload, qos=1)
+    return publish_command_and_wait_robot_ack(device_id, "stop", topic_for(device_id, "cmd/stop"), payload, qos=0)
 
 
 @app.post("/api/robots/{device_id}/control/mode/{mode}")
@@ -1424,7 +2058,7 @@ def set_mode(device_id: str, mode: str):
     if mode not in {"idle", "manual", "ai", "estop"}:
         raise HTTPException(status_code=400, detail="invalid_mode")
     payload = {"seq": command_seq(), "mode": mode}
-    return publish_command_and_wait_robot_ack(device_id, "mode", topic_for(device_id, "cmd/mode"), payload, qos=1)
+    return publish_command_and_wait_robot_ack(device_id, "mode", topic_for(device_id, "cmd/mode"), payload, qos=0)
 
 
 @app.get("/api/robots/{device_id}/cmd_acks")

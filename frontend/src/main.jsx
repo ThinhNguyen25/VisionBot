@@ -1,13 +1,13 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Activity, Bot, Camera, Cpu, Gamepad2, Gauge, HelpCircle, MessageCircle, PauseCircle, Radar, RefreshCw, ShieldAlert, SlidersHorizontal, Sparkles, Wifi, Zap } from 'lucide-react'
+import { Activity, Bot, Camera, Cpu, Gamepad2, Gauge, MessageCircle, Mic, PauseCircle, Play, Radar, RefreshCw, ShieldAlert, SlidersHorizontal, Sparkles, Wifi, Zap } from 'lucide-react'
 import './styles.css'
 
-const DEFAULT_DEVICE = import.meta.env.VITE_DEVICE_ID || 'VB-CAM-E9BFB4'
+const DEFAULT_DEVICE = import.meta.env.VITE_DEVICE_ID || ''
 const DEFAULT_API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
-const APP_VERSION = 'v1.2.0 local LAN compose'
-const DRIVE_INTERVAL_MS = 850
-const DRIVE_TTL_MS = 2000
+const APP_VERSION = 'v1.4.0 realtime VLM + voice'
+const DRIVE_INTERVAL_MS = 120
+const DRIVE_TTL_MS = 500
 
 const FALLBACK_DETECTORS = [
   { id: 'yolo11n.onnx', label: 'ONNX — YOLO11n realtime', recommended_imgsz: 320, speed: 'realtime' },
@@ -18,6 +18,7 @@ const FALLBACK_DETECTORS = [
 
 
 const FALLBACK_VLMS = [
+  { id: 'ggml-org/SmolVLM-500M-Instruct-GGUF', label: 'SmolVLM 500M GGUF — llama-server' },
   { id: 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct', label: 'SmolVLM2 500M — nhẹ nhất' },
   { id: 'HuggingFaceTB/SmolVLM-500M-Instruct', label: 'SmolVLM 500M — ổn định' },
 ]
@@ -135,7 +136,7 @@ function StatChip({label, value}) {
 
 function App() {
   const [apiBase, setApiBase] = React.useState(localStorage.getItem('apiBase') || DEFAULT_API)
-  const [deviceId, setDeviceId] = React.useState(localStorage.getItem('deviceId') || DEFAULT_DEVICE)
+  const [deviceId, setDeviceId] = React.useState(DEFAULT_DEVICE || localStorage.getItem('deviceId') || '')
   const [robot, setRobot] = React.useState(null)
   const [health, setHealth] = React.useState(null)
   const [aiStatus, setAiStatus] = React.useState(null)
@@ -144,17 +145,25 @@ function App() {
   const [servoAngle, setServoAngle] = React.useState(90)
   const [logs, setLogs] = React.useState([])
   const [aiMessages, setAiMessages] = React.useState([
-    { role: 'assistant', time: fmtTime(), text: 'Mình là AI của VisionBot. Bấm Detect để benchmark detector/bbox realtime. Bấm VLM hoặc gõ câu hỏi để model nhìn frame hiện tại, nhận dạng vật thể và trả lời như chat. Lần đầu tải model sẽ lâu một chút.' }
+    { role: 'assistant', time: fmtTime(), text: 'Mình là AI của VisionBot. Bấm Detect để benchmark detector/bbox realtime. Bấm VLM hoặc gõ câu hỏi để hỏi frame mới nhất như chatbot mini. Nếu dùng SmolVLM GGUF, hãy chạy llama-server trước; nếu chưa chạy mình sẽ báo lỗi rõ và không làm treo dashboard.' }
   ])
   const [chatInput, setChatInput] = React.useState('')
   const [activeDrive, setActiveDrive] = React.useState(null)
   const [aiBusy, setAiBusy] = React.useState(false)
   const [aiUnread, setAiUnread] = React.useState(false)
   const [logUnread, setLogUnread] = React.useState(false)
+  const [vlmLive, setVlmLive] = React.useState(null)
+  const [vlmInstruction, setVlmInstruction] = React.useState(localStorage.getItem('vlmInstruction') || 'What is in front of the robot? Describe briefly and give one safe driving recommendation.')
+  const [vlmInstructionVi, setVlmInstructionVi] = React.useState(localStorage.getItem('vlmInstructionVi') || 'Phía trước robot có gì? Hãy mô tả ngắn gọn và đưa ra một lời khuyên lái xe an toàn.')
+  const [vlmIntervalMs, setVlmIntervalMs] = React.useState(Number(localStorage.getItem('vlmIntervalMs') || 1500))
+  const [voiceState, setVoiceState] = React.useState(null)
+  const [voiceListening, setVoiceListening] = React.useState(false)
+  const [voiceText, setVoiceText] = React.useState('')
+  const [realtimeApiOk, setRealtimeApiOk] = React.useState(true)
   const [modelForm, setModelForm] = React.useState({
     detector_key: 'yolo11n.onnx||320||realtime',
     yolo_model: 'yolo11n.onnx', yolo_imgsz: 320, conf_threshold: 0.25, detect_interval_s: 0.2,
-    enable_vlm: true, vlm_model: 'HuggingFaceTB/SmolVLM-500M-Instruct'
+    enable_vlm: true, vlm_model: 'ggml-org/SmolVLM-500M-Instruct-GGUF'
   })
 
   const activeDriveRef = React.useRef(null)
@@ -166,11 +175,19 @@ function App() {
   const logStickRef = React.useRef(true)
   const modelDirtyRef = React.useRef(false)
   const firstModelSyncRef = React.useRef(false)
+  const recognitionRef = React.useRef(null)
+  const servoTouchedRef = React.useRef(false)
 
   React.useEffect(() => {
     localStorage.setItem('apiBase', apiBase)
     localStorage.setItem('deviceId', deviceId)
   }, [apiBase, deviceId])
+
+  React.useEffect(() => {
+    localStorage.setItem('vlmInstruction', vlmInstruction)
+    localStorage.setItem('vlmInstructionVi', vlmInstructionVi)
+    localStorage.setItem('vlmIntervalMs', String(vlmIntervalMs))
+  }, [vlmInstruction, vlmInstructionVi, vlmIntervalMs])
 
   React.useLayoutEffect(() => {
     const el = chatBoxRef.current
@@ -241,7 +258,7 @@ function App() {
     const data = await res.json().catch(() => ({ detail: 'non_json_response' }))
     if (!res.ok) {
       pushLog('err', `${res.status} ${path}`, data)
-      throw data
+      throw Object.assign(data, { status: res.status, path })
     }
     return data
   }, [apiBase, pushLog])
@@ -268,11 +285,46 @@ function App() {
     try {
       const h = await api('/api/health')
       setHealth(h)
-      const r = await api(`/api/robots/${deviceId}`)
-      setRobot(r)
-      setServoAngle(r?.state?.servo_angle ?? r?.servo_angle ?? 90)
+      const pickFirstRobot = async () => {
+        const listRes = await fetch(`${apiBase}/api/robots`)
+        const list = await listRes.json().catch(() => ({ robots: [] }))
+        const robots = Array.isArray(list?.robots) ? list.robots : []
+        const firstRobot = robots.find(x => x?.online) || robots[0]
+        const nextDeviceId = firstRobot?.device_id || firstRobot?.robot_id || firstRobot?.id
+        if (!listRes.ok || !nextDeviceId) return null
+        return { nextDeviceId, list }
+      }
+      let activeDeviceId = deviceId
+      if (!activeDeviceId) {
+        const picked = await pickFirstRobot()
+        if (!picked) {
+          setRobot(null)
+          setAiStatus(null)
+          return
+        }
+        activeDeviceId = picked.nextDeviceId
+        setDeviceId(activeDeviceId)
+        pushLog('ok', `auto selected robot ${activeDeviceId}`, picked.list)
+      }
+      let r
       try {
-        const s = await api(`/api/robots/${deviceId}/ai/status`)
+        r = await api(`/api/robots/${activeDeviceId}`)
+      } catch (err) {
+        const isMissingRobot = err?.detail === 'robot_not_found' || err?.detail === 'not_found'
+        if (!isMissingRobot) throw err
+
+        const picked = await pickFirstRobot()
+        if (!picked || picked.nextDeviceId === activeDeviceId) throw err
+
+        activeDeviceId = picked.nextDeviceId
+        setDeviceId(activeDeviceId)
+        pushLog('ok', `auto switched robot to ${activeDeviceId}`, picked.list)
+        r = await api(`/api/robots/${activeDeviceId}`)
+      }
+      setRobot(r)
+      if (!servoTouchedRef.current) setServoAngle(r?.state?.servo_angle ?? r?.servo_angle ?? 90)
+      try {
+        const s = await api(`/api/robots/${activeDeviceId}/ai/status`)
         setAiStatus(s)
         // Do not overwrite the user's dropdown while they are choosing a model.
         // The old UI re-synced from backend every poll, so the select jumped back
@@ -283,7 +335,7 @@ function App() {
         }
       } catch (_) {}
     } catch (_) {}
-  }, [api, deviceId, syncModelForm])
+  }, [api, apiBase, deviceId, pushLog, syncModelForm])
 
   React.useEffect(() => {
     refresh()
@@ -404,6 +456,7 @@ function App() {
   }
 
   const servo = async (angle) => {
+    servoTouchedRef.current = true
     setServoAngle(angle)
     const data = await api(`/api/robots/${deviceId}/control/servo`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seq: seq32(), angle })
@@ -440,13 +493,16 @@ function App() {
   const preloadSelectedModel = async () => {
     await applyAiConfig()
     setAiBusy(true)
+    setVlmLive(prev => ({ ...(prev || {}), last_error: 'Đang tải model AI. Lần đầu có thể hơi lâu, đợi backend báo xong.' }))
     pushAi('user', `Tải model đang chọn: ${modelForm.yolo_model}${modelForm.enable_vlm ? ' + VLM ' + modelForm.vlm_model : ''}`)
     try {
       const data = await api(`/api/ai/preload?load_detector=true&load_vlm=${modelForm.enable_vlm ? 'true' : 'false'}`, { method: 'POST' })
       setAiStatus(prev => ({ ...(prev || {}), ai: data.ai, presets: data.presets }))
+      setVlmLive(prev => ({ ...(prev || {}), last_error: null, last_answer: 'Đã tải model xong. Bấm Start VLM realtime để chạy suy luận liên tục.' }))
       pushAi('assistant', 'Mình đã tải/khởi động model đang chọn xong. Nếu model lớn, lần đầu có thể mất lâu; lần sau dùng cache local.', data)
       pushLog('ok', 'AI model preloaded', data)
     } catch (err) {
+      setVlmLive(prev => ({ ...(prev || {}), last_error: `Tải model lỗi: ${err?.detail || err?.error || err?.message || 'backend_error'}` }))
       pushAi('assistant', 'Mình chưa preload được model. Xem khung cmd_ack/logs bên dưới để biết lỗi.', err)
     } finally {
       setAiBusy(false)
@@ -523,10 +579,144 @@ function App() {
     await askAiQuestion(q)
   }
 
-  const pill = (ok, text) => <span className={`pill ${ok ? 'ok' : 'bad'}`}>{text}</span>
+  const refreshRuntimeStates = React.useCallback(async () => {
+    if (!deviceId || !realtimeApiOk) return
+    try {
+      const live = await api(`/api/robots/${deviceId}/ai/vlm-stream/status`)
+      setVlmLive(live.vlm_stream)
+    } catch (err) {
+      if (err?.status === 404) {
+        setRealtimeApiOk(false)
+        setVlmLive(prev => ({ ...(prev || {}), running: false, last_error: 'Backend đang chạy bản cũ nên chưa có API VLM realtime/voice. Hãy copy backend/app/main.py mới sang WSL rồi restart backend.' }))
+      }
+    }
+    try {
+      const voice = await api(`/api/robots/${deviceId}/control/voice/status`)
+      setVoiceState(voice.voice)
+    } catch (err) {
+      if (err?.status === 404) {
+        setRealtimeApiOk(false)
+        setVoiceState({ running: false, last_error: 'Backend cũ chưa có API voice control.' })
+      }
+    }
+  }, [api, deviceId, realtimeApiOk])
+
+  React.useEffect(() => {
+    refreshRuntimeStates()
+    const running = vlmLive?.running || voiceState?.running
+    const t = setInterval(refreshRuntimeStates, running ? 900 : 2500)
+    return () => clearInterval(t)
+  }, [refreshRuntimeStates, vlmLive?.running, voiceState?.running])
+
+  const startVlmLive = async () => {
+    if (!realtimeApiOk) {
+      setVlmLive(prev => ({ ...(prev || {}), running: false, last_error: 'Chưa bật được: backend đang chạy bản cũ, thiếu endpoint /ai/vlm-stream. Copy backend mới và restart backend trước.' }))
+      return
+    }
+    setAiBusy(true)
+    try {
+      const data = await api(`/api/robots/${deviceId}/ai/vlm-stream/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: `${vlmInstruction}\nVietnamese UI translation: ${vlmInstructionVi}`, interval_ms: Number(vlmIntervalMs) })
+      })
+      setVlmLive(data.vlm_stream)
+      pushAi('assistant', `Đã bật VLM realtime mỗi ${Number(vlmIntervalMs)} ms. Mình sẽ liên tục nhìn latest frame và cập nhật lời khuyên.`, data)
+      pushLog('ai', 'VLM realtime started', data)
+    } catch (err) {
+      if (err?.status === 404) setRealtimeApiOk(false)
+      setVlmLive(prev => ({ ...(prev || {}), running: false, last_error: `Chưa bật được VLM realtime: ${err?.detail || err?.error || err?.message || 'backend_error'}` }))
+      pushAi('assistant', 'Chưa bật được VLM realtime. Kiểm tra camera frame, backend và llama-server.', err)
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  const stopVlmLive = async () => {
+    try {
+      const data = await api(`/api/robots/${deviceId}/ai/vlm-stream/stop`, { method: 'POST' })
+      setVlmLive(data.vlm_stream)
+      pushLog('ai', 'VLM realtime stopped', data)
+    } catch (err) {
+      pushLog('err', 'stop VLM realtime failed', err)
+    }
+  }
+
+  const sendVoiceText = async (text) => {
+    const spoken = String(text || '').trim()
+    if (!spoken) return
+    if (!realtimeApiOk) {
+      setVoiceState({ running: false, last_error: 'Backend đang chạy bản cũ, thiếu endpoint /control/voice.' })
+      return
+    }
+    setVoiceText(spoken)
+    try {
+      const data = await api(`/api/robots/${deviceId}/control/voice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: spoken })
+      })
+      setVoiceState({ ...(data.voice || {}), last_error: data.ok ? null : (data.intent?.message || 'Lệnh giọng nói cần kèm thời lượng, ví dụ: tiến 5 giây.') })
+      pushLog(data.ok ? 'ack' : 'err', `voice: ${spoken}`, data)
+    } catch (err) {
+      setVoiceState(prev => ({ ...(prev || {}), running: false, last_error: `Voice lỗi: ${err?.detail || err?.error || err?.message || 'backend_error'}` }))
+      pushLog('err', `voice failed: ${spoken}`, err)
+    }
+  }
+
+  const stopVoice = async () => {
+    try {
+      const data = await api(`/api/robots/${deviceId}/control/voice/stop`, { method: 'POST' })
+      setVoiceState(data.voice)
+      pushLog('ack', 'voice stop', data)
+    } catch (err) {
+      pushLog('err', 'voice stop failed', err)
+    }
+  }
+
+  const toggleVoiceListening = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      pushLog('err', 'Trình duyệt không hỗ trợ Web Speech API. Dùng Chrome/Edge hoặc nhập lệnh bằng ô text.', {})
+      return
+    }
+    if (voiceListening && recognitionRef.current) {
+      recognitionRef.current.stop()
+      return
+    }
+    const rec = new SpeechRecognition()
+    recognitionRef.current = rec
+    rec.lang = 'vi-VN'
+    rec.interimResults = false
+    rec.continuous = true
+    rec.onstart = () => setVoiceListening(true)
+    rec.onend = () => setVoiceListening(false)
+    rec.onerror = (e) => {
+      setVoiceListening(false)
+      pushLog('err', `voice recognition error: ${e.error || 'unknown'}`, e)
+    }
+    rec.onresult = (event) => {
+      const result = event.results[event.results.length - 1]
+      const text = result?.[0]?.transcript || ''
+      sendVoiceText(text)
+    }
+    rec.start()
+  }
+
+  const pill = (state, text) => {
+    const cls = state === true ? 'ok' : (state === false ? 'bad' : state)
+    return <span className={`pill ${cls}`}>{text}</span>
+  }
   const cam = robot?.camera_session || aiStatus?.camera_session || {}
   const yolo = aiStatus?.ai?.yolo || health?.ai?.status?.yolo || {}
   const vlm = aiStatus?.ai?.vlm || health?.ai?.status?.vlm || {}
+  const backendStatus = health?.backend_status || (health?.mqtt_connected ? 'ready' : 'degraded')
+  const mqttState = health?.mqtt_state?.state || (health?.mqtt_connected ? 'connected' : 'disconnected')
+  const cameraStatus = cam.camera_status || (cam.latest_frame_age_ms != null ? 'online' : 'no_frame')
+  const cameraPillState = cameraStatus === 'online' ? 'ok' : (cameraStatus === 'stale' ? 'warn' : 'bad')
+  const robotPillState = robot?.online ? 'ok' : 'bad'
+  const robotMqttOk = robot?.mqtt_connected !== false && !!robot?.online
+  const frameAge = cam.latest_frame_age_ms == null ? '-' : `${Math.round(cam.latest_frame_age_ms / 100) / 10}s`
   const detectorOptions = aiStatus?.presets?.detector_presets || FALLBACK_DETECTORS
   const vlmOptions = aiStatus?.presets?.vlm_presets || FALLBACK_VLMS
   const detMetric = yolo.benchmark || yolo.model_metric || null
@@ -535,17 +725,31 @@ function App() {
   const motorShown = activeDrive ? `${activeDrive} (lệnh đang giữ)` : reportedMotor
   const lastAck = robot?.state?.last_cmd_ack_detail || robot?.last_cmd_ack?.detail || '-'
 
+  const vlmLiveAnswer = vlmLive?.last_answer || vlmLive?.last_result?.answer || vlmLive?.last_result?.scene?.answer_vi || ''
+  const vlmLiveSafety = vlmLive?.last_safety || vlmLive?.last_result?.safety || null
+  const streamFps = cam.stream_fps ?? cam.fps ?? '-'
+  const aiFps = detMetric?.approx_fps ?? yolo.approx_detect_fps ?? yolo.inference_fps ?? '-'
+  const vlmFps = vlmMetric?.approx_fps ?? vlm.inference_fps ?? '-'
+  const modelState = vlm?.loaded ? 'VLM loaded' : (vlm?.enabled ? 'VLM enabled' : 'VLM off')
+  const voiceMotion = voiceState?.desired_motion || 'stop'
+  const voiceRemaining = voiceState?.remaining_s ?? (voiceState?.remaining_ms != null ? Math.round(voiceState.remaining_ms / 100) / 10 : null)
+  const voiceStatusText = voiceState?.running
+    ? `${voiceMotion} ${voiceRemaining ?? '-'}s`
+    : (voiceState?.last_error || (voiceListening ? 'đang nghe' : 'idle'))
+
   return <div className="app">
     <header className="hero">
       <div>
         <div className="eyebrow"><Bot size={18}/> VisionBot Control Center <span>{APP_VERSION}</span></div>
         <h1>Robot AI/IoT Dashboard</h1>
-        <p>Frontend React gọi Backend FastAPI. Backend publish MQTT xuống ESP32-CAM. AI rút gọn ổn định: YOLO/SSD realtime + VLM hỏi frame. Bản LAN chạy bằng Docker Compose.</p>
+        <p>Frontend React gọi Backend FastAPI. Camera dùng latest-frame buffer, MQTT có ACK/TTL an toàn, YOLO realtime và VLM on-demand qua llama-server hoặc fallback local.</p>
       </div>
       <div className="statusBox">
-        {pill(!!health?.mqtt_connected, health?.mqtt_connected ? 'MQTT backend OK' : 'MQTT backend lỗi')}
-        {pill(!!robot?.online, robot?.online ? 'Robot online' : 'Robot offline')}
-        {pill(!!robot?.mqtt_connected, robot?.mqtt_connected ? 'Robot MQTT OK' : 'Robot MQTT lỗi')}
+        {pill(backendStatus === 'ready' ? 'ok' : 'warn', `Backend ${backendStatus}`)}
+        {pill(health?.mqtt_connected ? 'ok' : 'bad', `MQTT ${mqttState}`)}
+        {pill(cameraPillState, `Camera ${cameraStatus}`)}
+        {pill(robotPillState, robot?.online ? 'Robot online' : 'Robot offline')}
+        {pill(robotMqttOk ? 'ok' : 'bad', robotMqttOk ? 'Robot MQTT OK' : 'Robot MQTT loi')}
       </div>
     </header>
 
@@ -557,26 +761,28 @@ function App() {
       <button className="danger" onClick={estop} title="Dừng khẩn cấp, robot vào estop. Muốn chạy lại phải bấm Manual mode"><ShieldAlert size={18}/> Dừng khẩn cấp</button>
     </section>
 
-    <section className="helpStrip card">
-      <div><HelpCircle size={18}/><b>Ý nghĩa nút:</b></div>
-      <span><b>Video raw</b> xem camera gốc</span>
-      <span><b>AI overlay</b> camera có bbox detector</span>
-      <span><b>Detect</b> nhận diện một frame</span>
-      <span><b>VLM</b> hỏi AI nhận dạng/caption/grounding theo frame</span>
-      <span><b>Tắt stream</b> ngắt receiver camera ở backend</span>
-      <span><b>W/A/S/D</b> giữ để chạy, thả để dừng</span>
-    </section>
-
     <main className="grid">
       <section className="leftStack">
       <section className="card videoCard">
         <div className="cardTitle"><Camera/> Camera</div>
-        <div className="toolbar">
+        <div className="toolbar cameraToolbar">
           <button className={videoMode === 'raw' && videoOn ? 'selected' : ''} onClick={() => startCamera('raw')}>Video raw</button>
           <button className={videoMode === 'ai' && videoOn ? 'selected' : ''} onClick={() => startCamera('ai')}><Radar size={17}/> AI overlay</button>
-          <button onClick={runAiDetect}><Cpu size={17}/> Detect</button>
-          <button onClick={runAiAnalyze}><Sparkles size={17}/> VLM</button>
+          <button className={vlmLive?.running ? 'softDanger' : 'primary'} onClick={vlmLive?.running ? stopVlmLive : startVlmLive} disabled={aiBusy}>
+            {vlmLive?.running ? <PauseCircle size={17}/> : <Play size={17}/>}
+            {vlmLive?.running ? 'Stop VLM' : 'Start VLM'}
+          </button>
           <button className="softDanger" onClick={stopCamera}><PauseCircle size={17}/> Tắt stream</button>
+          <button className={voiceListening ? 'selected' : ''} onClick={toggleVoiceListening}><Mic size={17}/> {voiceListening ? 'Tắt voice' : 'Bật voice'}</button>
+          <button onClick={preloadSelectedModel} disabled={aiBusy}><Cpu size={17}/> Tải model</button>
+        </div>
+        <div className="compactMetrics">
+          <StatChip label="Stream FPS" value={streamFps} />
+          <StatChip label="AI FPS" value={aiFps} />
+          <StatChip label="VLM FPS" value={vlmFps} />
+          <StatChip label="Frame" value={cam.latest_frame_kb ? `${cam.latest_frame_kb} KB` : '-'} />
+          <StatChip label="Model" value={modelState} />
+          <StatChip label="Voice" value={voiceStatusText} />
         </div>
         <div className="statsRow">
           <StatChip label="Stream FPS" value={cam.stream_fps ?? '-'} />
@@ -587,6 +793,27 @@ function App() {
           <StatChip label="Avg" value={detMetric?.avg_ms ? `${detMetric.avg_ms} ms` : '-'} />
           <StatChip label="AI FPS" value={detMetric?.approx_fps || yolo.approx_detect_fps || '-'} />
           <StatChip label="Objects" value={yolo.last_objects ?? '-'} />
+        </div>
+        <div className="liveVlmPanel">
+          <div className="liveHeader">
+            <div><Sparkles size={17}/><b>Realtime VLM</b>{pill(vlmLive?.running ? 'ok' : 'warn', vlmLive?.running ? 'running' : 'stopped')}</div>
+            <label className="intervalSelect">Interval
+              <select value={vlmIntervalMs} onChange={e => setVlmIntervalMs(Number(e.target.value))}>
+                {[500, 1000, 1500, 2000, 3000, 5000].map(v => <option key={v} value={v}>{v}ms</option>)}
+              </select>
+            </label>
+          </div>
+          <textarea value={vlmInstruction} onChange={e => setVlmInstruction(e.target.value)} placeholder="English instruction for realtime VLM" />
+          <textarea className="translationBox" value={vlmInstructionVi} onChange={e => setVlmInstructionVi(e.target.value)} placeholder="Bản dịch tiếng Việt" />
+          <div className="liveAnswer">
+            {vlmLiveAnswer || vlmLive?.last_error || (!realtimeApiOk ? 'Backend đang chạy bản cũ: thiếu API VLM realtime/voice. Copy backend mới sang WSL rồi restart backend.' : 'Bấm Start VLM realtime để AI liên tục nhìn latest frame và trả lời ở đây.')}
+          </div>
+          <div className="liveMeta">
+            <span>Chu kỳ: {vlmLive?.interval_ms || vlmIntervalMs}ms</span>
+            <span>Lượt: {vlmLive?.run_count || 0}</span>
+            <span>Tuổi frame trả lời: {vlmLive?.last_age_ms == null ? '-' : `${Math.round(vlmLive.last_age_ms / 100) / 10}s`}</span>
+            <span>Safety: {vlmLiveSafety?.safe_action || '-'}</span>
+          </div>
         </div>
         <div className="modelPanel">
           <div className="modelHeader"><SlidersHorizontal size={17}/><b>AI model runtime</b><span>Danh sách rút gọn để giữ stream ổn định. Chọn model → Áp dụng → Tải model → Detect.</span></div>
@@ -659,7 +886,7 @@ function App() {
       <section className="sideStack">
       <section className="card controlCard">
         <div className="cardTitle"><Gamepad2/> Điều khiển giữ-nút</div>
-        <p className="hint">Giữ W/A/S/D hoặc nút bên dưới để chạy. Thả tay sẽ gửi stop. Đã sửa đảo trái/phải theo wiring hiện tại. Mất mạng thì TTL vẫn tự dừng.</p>
+        <p className="hint">Giữ W/A/S/D hoặc nút bên dưới để chạy. Thả tay sẽ gửi stop. Mất mạng thì TTL vẫn tự dừng.</p>
         <div className="driveStatus">Lệnh hiện tại: <b>{motorShown}</b></div>
         <div className="pad" onContextMenu={(e) => e.preventDefault()}>
           <button className={activeDrive === 'forward' ? 'active' : ''} onPointerDown={() => beginDrive('forward')} onPointerUp={endDrive} onPointerCancel={endDrive} onPointerLeave={endDrive}>Tiến<br/><kbd>W</kbd></button>
@@ -675,6 +902,24 @@ function App() {
         </div>
       </section>
 
+      <section className="card voiceCard">
+        <div className="cardTitle"><Mic/> Điều khiển giọng nói</div>
+        <div className="voiceStatus">
+          {pill(voiceState?.running ? 'ok' : 'warn', voiceState?.running ? `Latched: ${voiceMotion}` : 'Voice idle')}
+          {pill(voiceListening ? 'ok' : 'warn', voiceListening ? 'Mic listening' : 'Mic off')}
+        </div>
+        <p className="hint">Nói: tiến, lùi, rẽ trái, rẽ phải, dừng lại. Lệnh giọng nói được backend gửi lặp mỗi 150ms; ESP vẫn tự dừng nếu quá TTL.</p>
+        <div className="voiceActions">
+          <button className={voiceListening ? 'selected' : 'primary'} onClick={toggleVoiceListening}><Mic size={16}/> {voiceListening ? 'Dừng nghe' : 'Bật mic'}</button>
+          <button className="softDanger" onClick={stopVoice}><ShieldAlert size={16}/> Dừng voice</button>
+        </div>
+        <form className="voiceInput" onSubmit={(e) => { e.preventDefault(); sendVoiceText(voiceText) }}>
+          <input value={voiceText} onChange={e => setVoiceText(e.target.value)} placeholder="Nhập thử: tiến / lùi / rẽ trái / dừng lại" />
+          <button type="submit">Gửi lệnh</button>
+        </form>
+        {voiceState?.last_error && <div className="inlineError">{voiceState.last_error}</div>}
+      </section>
+
       <section className="card facts">
         <div className="cardTitle"><Wifi/> Robot state</div>
         <dl>
@@ -686,7 +931,12 @@ function App() {
           <dt>Servo</dt><dd>{robot?.state?.servo_angle ?? robot?.servo_angle ?? '-'}</dd>
           <dt>RSSI</dt><dd>{robot?.state?.wifi_rssi_dbm ?? '-'}</dd>
           <dt>Camera</dt><dd>{robot?.camera_ready ? 'ready' : '-'}</dd>
-          <dt>VLM</dt><dd>{vlm.enabled ? (vlm.loaded ? 'loaded' : 'enabled') : 'off'}</dd>
+          <dt>Cam status</dt><dd>{cameraStatus} · age {frameAge}</dd>
+          <dt>Cam source</dt><dd>{cam.source || '-'}</dd>
+          <dt>Cam state</dt><dd>{cam.state || '-'}{cam.reconnect_delay_s ? ` · retry ${cam.reconnect_delay_s}s` : ''}</dd>
+          <dt>Heartbeat</dt><dd>{robot?.liveness || '-'}{robot?.last_seen_age_ms != null ? ` · ${Math.round(robot.last_seen_age_ms / 100) / 10}s` : ''}</dd>
+          <dt>VLM</dt><dd>{vlm.enabled ? `${vlm.provider || 'local'} · ${vlm.loaded ? 'loaded' : 'enabled'}` : 'off'}</dd>
+          <dt>VLM URL</dt><dd>{vlm.openai_base_url || '-'}</dd>
         </dl>
       </section>
 

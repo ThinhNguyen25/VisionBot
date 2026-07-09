@@ -17,6 +17,7 @@ services:
     restart: unless-stopped
     depends_on:
       - mqtt
+      - camera-relay
     ports:
       - "8000:8000"
     environment:
@@ -33,9 +34,28 @@ services:
       AI_CONF_THRESHOLD: "0.25"
       AI_DETECT_INTERVAL_S: "0.20"
       AI_ENABLE_VLM: "0"
+      AI_VLM_PROVIDER: llama_server
+      AI_VLM_MODEL: ggml-org/SmolVLM-500M-Instruct-GGUF
+      AI_VLM_OPENAI_BASE_URL: http://host.docker.internal:8080
+      AI_VLM_TIMEOUT_S: "25"
       AI_MODEL_DIR: /app/models
+      CAMERA_RELAY_WS: ws://camera-relay:8001/camera/ws/subscribe/{device_id}
+      CAMERA_RELAY_TOKEN: ""
     volumes:
       - ai_models:/app/models
+
+  camera-relay:
+    build:
+      context: ./camera-relay
+    container_name: visionbot-camera-relay
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      CAMERA_TOKEN: ""
+      BACKEND_TOKEN: ""
+      MAX_FRAME_SIZE_BYTES: "120000"
+      CAMERA_TIMEOUT_SEC: "10"
 
   frontend:
     build:

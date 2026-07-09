@@ -1,0 +1,13 @@
+{$VISIONBOT_DOMAIN} {
+  encode zstd gzip
+
+  handle /camera/* {
+    reverse_proxy camera-relay:8001
+  }
+
+  handle /camera/ws/* {
+    reverse_proxy camera-relay:8001
+  }
+
+  respond "VisionBot VPS relay is running" 200
+}

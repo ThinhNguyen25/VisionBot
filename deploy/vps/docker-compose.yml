@@ -1,0 +1,46 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: visionbot-vps-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+  camera-relay:
+    build:
+      context: ../../camera-relay
+    container_name: visionbot-camera-relay
+    restart: unless-stopped
+    environment:
+      CAMERA_TOKEN: ${CAMERA_TOKEN:-}
+      BACKEND_TOKEN: ${BACKEND_TOKEN:-}
+      MAX_FRAME_SIZE_BYTES: ${MAX_FRAME_SIZE_BYTES:-120000}
+      CAMERA_TIMEOUT_SEC: ${CAMERA_TIMEOUT_SEC:-10}
+    expose:
+      - "8001"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: visionbot-caddy
+    restart: unless-stopped
+    depends_on:
+      - camera-relay
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      VISIONBOT_DOMAIN: ${VISIONBOT_DOMAIN:-localhost}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  caddy_data:
+  caddy_config:
