@@ -153,7 +153,7 @@ function App() {
   const [aiUnread, setAiUnread] = React.useState(false)
   const [logUnread, setLogUnread] = React.useState(false)
   const [vlmLive, setVlmLive] = React.useState(null)
-  const [vlmInstruction, setVlmInstruction] = React.useState(localStorage.getItem('vlmInstruction') || 'What is in front of the robot? Describe briefly and give one safe driving recommendation.')
+  const [vlmInstruction, setVlmInstruction] = React.useState(localStorage.getItem('vlmInstruction') || 'Answer only in Vietnamese. What is in front of the robot? Describe briefly and give one safe driving direction recommendation.')
   const [vlmInstructionVi, setVlmInstructionVi] = React.useState(localStorage.getItem('vlmInstructionVi') || 'Phía trước robot có gì? Hãy mô tả ngắn gọn và đưa ra một lời khuyên lái xe an toàn.')
   const [vlmIntervalMs, setVlmIntervalMs] = React.useState(Number(localStorage.getItem('vlmIntervalMs') || 1500))
   const [voiceState, setVoiceState] = React.useState(null)
@@ -361,6 +361,11 @@ function App() {
       pushLog('err', 'stop stream failed', err)
     }
     refresh()
+  }
+
+  const toggleVideoStream = async () => {
+    if (videoOn) return stopCamera()
+    return startCamera(videoMode || 'raw')
   }
 
   const videoUrl = videoMode === 'ai'
@@ -619,7 +624,7 @@ function App() {
       const data = await api(`/api/robots/${deviceId}/ai/vlm-stream/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruction: `${vlmInstruction}\nVietnamese UI translation: ${vlmInstructionVi}`, interval_ms: Number(vlmIntervalMs) })
+        body: JSON.stringify({ instruction: `${vlmInstruction}\nVietnamese UI translation: ${vlmInstructionVi}\nReturn Vietnamese only. Do not answer in English.`, interval_ms: Number(vlmIntervalMs) })
       })
       setVlmLive(data.vlm_stream)
       pushAi('assistant', `Đã bật VLM realtime mỗi ${Number(vlmIntervalMs)} ms. Mình sẽ liên tục nhìn latest frame và cập nhật lời khuyên.`, data)
@@ -768,7 +773,7 @@ function App() {
         <section className="headerConfig">
           <label>Backend API<input value={apiBase} onChange={e => setApiBase(e.target.value)} /></label>
           <label>Device ID<input value={deviceId} onChange={e => setDeviceId(e.target.value)} /></label>
-          <button className="primary" onClick={refresh} title="Gọi /api/health và /api/robots để cập nhật trạng thái"><RefreshCw size={18}/> Làm mới</button>
+          <button className={videoOn ? 'softDanger' : 'primary'} onClick={toggleVideoStream} title="Bật/tắt video stream từ ESP32-CAM">{videoOn ? <PauseCircle size={18}/> : <Play size={18}/>} {videoOn ? 'Tắt stream' : 'Bật stream'}</button>
           <button onClick={setModeManual} title="Đưa robot về manual, thoát estop để được phép điều khiển"><Gamepad2 size={18}/> Manual mode</button>
           <button className="danger" onClick={estop} title="Dừng khẩn cấp, robot vào estop. Muốn chạy lại phải bấm Manual mode"><ShieldAlert size={18}/> Dừng khẩn cấp</button>
           <button className={voiceListening ? 'selected' : ''} onClick={toggleVoiceListening}><Mic size={18}/> Bật mic</button>
@@ -815,6 +820,9 @@ function App() {
             <div>
               <Sparkles size={17}/>
               <b>Realtime VLM</b>
+              <button className={videoOn ? 'vlmToggleBtn softDanger' : 'vlmToggleBtn primary'} onClick={toggleVideoStream}>
+                {videoOn ? 'Tắt stream' : 'Bật stream'}
+              </button>
               <button className={vlmLive?.running ? 'vlmToggleBtn softDanger' : 'vlmToggleBtn primary'} onClick={vlmLive?.running ? stopVlmLive : startVlmLive} disabled={aiBusy}>
                 {vlmLive?.running ? 'Tắt VLM' : 'Bật VLM'}
               </button>

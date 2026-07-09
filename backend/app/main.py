@@ -1625,7 +1625,7 @@ def build_ai_scene_result(device_id: str, frame: bytes, question: str | None = N
     vlm_question = question
     if question:
         det_summary = ", ".join([f"{d.get('label')} {d.get('confidence')}" for d in dets[:8]]) or "không có detection rõ từ detector realtime"
-        vlm_question = f"Detector realtime đang thấy: {det_summary}. Người dùng hỏi: {question}"
+        vlm_question = f"Trả lời hoàn toàn bằng tiếng Việt, không dùng tiếng Anh. Detector realtime đang thấy: {det_summary}. Người dùng hỏi: {question}. Hãy nói rõ phía trước có gì, có vật cản không, và robot nên đi hướng nào hoặc dừng lại."
     scene = vision_ai.analyze_scene(frame, question=vlm_question, detector_labels=detector_labels)
     labels = set(detector_labels)
     labels |= {d.get("label", "").lower() for d in scene.get("detections", [])} if isinstance(scene, dict) else set()
@@ -1643,7 +1643,7 @@ def vlm_stream_loop(device_id: str) -> None:
             state = vlm_streams.get(device_id)
             if not state or not state.get("running"):
                 return
-            instruction = state.get("instruction") or "Phía trước là gì? Hãy mô tả ngắn gọn và đưa ra lời khuyên an toàn cho robot."
+            instruction = state.get("instruction") or "Trả lời bằng tiếng Việt. Phía trước là gì? Hãy mô tả ngắn gọn và đưa ra lời khuyên an toàn cho robot."
             interval_ms = int(state.get("interval_ms") or 1500)
             state["state"] = "running"
         try:
@@ -1761,7 +1761,8 @@ def voice_latch_loop(device_id: str) -> None:
                 publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice_safety"}, qos=0, timeout_s=0.5)
                 stop_voice_latch(device_id, reason="safety_stop")
                 return
-            publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": desired, "ttl_ms": 500, "mode": "manual", "source": "voice_timed"}, qos=0, timeout_s=0.5)
+            hardware_desired = {"left": "right", "right": "left"}.get(desired, desired)
+            publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": hardware_desired, "ttl_ms": 500, "mode": "manual", "source": "voice_timed"}, qos=0, timeout_s=0.5)
             with runtime_lock:
                 state = voice_latches.get(device_id)
                 if state:
@@ -1940,7 +1941,7 @@ def ai_ask(device_id: str, req: AIAskRequest):
     detections = vision_ai.detect(frame, force=False)
     dets = detections.get("detections", []) if isinstance(detections, dict) else []
     det_summary = ", ".join([f"{d.get('label')} {d.get('confidence')}" for d in dets[:8]]) or "không có detection rõ từ detector realtime"
-    vlm_question = f"Detector realtime đang thấy: {det_summary}. Người dùng hỏi: {req.question}"
+    vlm_question = f"Trả lời hoàn toàn bằng tiếng Việt, không dùng tiếng Anh. Detector realtime đang thấy: {det_summary}. Người dùng hỏi: {req.question}"
     detector_labels = {d.get("label", "").lower() for d in detections.get("detections", [])}
     scene = vision_ai.analyze_scene(frame, question=vlm_question, detector_labels=detector_labels)
     labels = set(detector_labels)
