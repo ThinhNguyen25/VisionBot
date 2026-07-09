@@ -1,6 +1,6 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Activity, Bot, Camera, Cpu, Gamepad2, Gauge, MessageCircle, Mic, PauseCircle, Play, Radar, RefreshCw, ShieldAlert, SlidersHorizontal, Sparkles, Wifi, Zap } from 'lucide-react'
+import { Activity, Bot, Camera, ChevronDown, ChevronUp, Cpu, Gamepad2, Gauge, MessageCircle, Mic, PauseCircle, Play, Radar, RefreshCw, ShieldAlert, SlidersHorizontal, Sparkles, Wifi, Zap } from 'lucide-react'
 import './styles.css'
 
 const DEFAULT_DEVICE = import.meta.env.VITE_DEVICE_ID || ''
@@ -160,6 +160,7 @@ function App() {
   const [voiceListening, setVoiceListening] = React.useState(false)
   const [voiceText, setVoiceText] = React.useState('')
   const [realtimeApiOk, setRealtimeApiOk] = React.useState(true)
+  const [mobileHeaderOpen, setMobileHeaderOpen] = React.useState(false)
   const [modelForm, setModelForm] = React.useState({
     detector_key: 'yolo11n.onnx||320||realtime',
     yolo_model: 'yolo11n.onnx', yolo_imgsz: 320, conf_threshold: 0.25, detect_interval_s: 0.2,
@@ -703,6 +704,15 @@ function App() {
     rec.start()
   }
 
+  const stopMicAndVoice = async () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+      recognitionRef.current = null
+    }
+    setVoiceListening(false)
+    await stopVoice()
+  }
+
   const pill = (state, text) => {
     const cls = state === true ? 'ok' : (state === false ? 'bad' : state)
     return <span className={`pill ${cls}`}>{text}</span>
@@ -738,28 +748,34 @@ function App() {
     : (voiceState?.last_error || (voiceListening ? 'đang nghe' : 'idle'))
 
   return <div className="app">
-    <header className="hero">
+    <header className={`hero ${mobileHeaderOpen ? 'mobileOpen' : ''}`}>
       <div>
         <div className="eyebrow"><Bot size={18}/> VisionBot Control Center <span>{APP_VERSION}</span></div>
         <h1>Robot AI/IoT Dashboard</h1>
         <p>Frontend React gọi Backend FastAPI. Camera dùng latest-frame buffer, MQTT có ACK/TTL an toàn, YOLO realtime và VLM on-demand qua llama-server hoặc fallback local.</p>
       </div>
-      <div className="statusBox">
-        {pill(backendStatus === 'ready' ? 'ok' : 'warn', `Backend ${backendStatus}`)}
-        {pill(health?.mqtt_connected ? 'ok' : 'bad', `MQTT ${mqttState}`)}
-        {pill(cameraPillState, `Camera ${cameraStatus}`)}
-        {pill(robotPillState, robot?.online ? 'Robot online' : 'Robot offline')}
-        {pill(robotMqttOk ? 'ok' : 'bad', robotMqttOk ? 'Robot MQTT OK' : 'Robot MQTT loi')}
+      <button className="mobileHeaderToggle" type="button" onClick={() => setMobileHeaderOpen(v => !v)} aria-label={mobileHeaderOpen ? 'Ẩn bảng điều khiển trên cùng' : 'Hiện bảng điều khiển trên cùng'}>
+        {mobileHeaderOpen ? <ChevronUp size={22}/> : <ChevronDown size={22}/>}
+      </button>
+      <div className="mobileHeaderPanel">
+        <div className="statusBox">
+          {pill(backendStatus === 'ready' ? 'ok' : 'warn', `Backend ${backendStatus}`)}
+          {pill(health?.mqtt_connected ? 'ok' : 'bad', `MQTT ${mqttState}`)}
+          {pill(cameraPillState, `Camera ${cameraStatus}`)}
+          {pill(robotPillState, robot?.online ? 'Robot online' : 'Robot offline')}
+          {pill(robotMqttOk ? 'ok' : 'bad', robotMqttOk ? 'Robot MQTT OK' : 'Robot MQTT loi')}
+        </div>
+        <section className="headerConfig">
+          <label>Backend API<input value={apiBase} onChange={e => setApiBase(e.target.value)} /></label>
+          <label>Device ID<input value={deviceId} onChange={e => setDeviceId(e.target.value)} /></label>
+          <button className="primary" onClick={refresh} title="Gọi /api/health và /api/robots để cập nhật trạng thái"><RefreshCw size={18}/> Làm mới</button>
+          <button onClick={setModeManual} title="Đưa robot về manual, thoát estop để được phép điều khiển"><Gamepad2 size={18}/> Manual mode</button>
+          <button className="danger" onClick={estop} title="Dừng khẩn cấp, robot vào estop. Muốn chạy lại phải bấm Manual mode"><ShieldAlert size={18}/> Dừng khẩn cấp</button>
+          <button className={voiceListening ? 'selected' : ''} onClick={toggleVoiceListening}><Mic size={18}/> Bật mic</button>
+          <button className="softDanger" onClick={stopMicAndVoice}><Mic size={18}/> Tắt mic</button>
+        </section>
       </div>
     </header>
-
-    <section className="config card">
-      <label>Backend API<input value={apiBase} onChange={e => setApiBase(e.target.value)} /></label>
-      <label>Device ID<input value={deviceId} onChange={e => setDeviceId(e.target.value)} /></label>
-      <button className="primary" onClick={refresh} title="Gọi /api/health và /api/robots để cập nhật trạng thái"><RefreshCw size={18}/> Làm mới</button>
-      <button onClick={setModeManual} title="Đưa robot về manual, thoát estop để được phép điều khiển"><Gamepad2 size={18}/> Manual mode</button>
-      <button className="danger" onClick={estop} title="Dừng khẩn cấp, robot vào estop. Muốn chạy lại phải bấm Manual mode"><ShieldAlert size={18}/> Dừng khẩn cấp</button>
-    </section>
 
     <main className="grid">
       <section className="leftStack">
@@ -796,7 +812,14 @@ function App() {
         </div>
         <div className="liveVlmPanel">
           <div className="liveHeader">
-            <div><Sparkles size={17}/><b>Realtime VLM</b>{pill(vlmLive?.running ? 'ok' : 'warn', vlmLive?.running ? 'running' : 'stopped')}</div>
+            <div>
+              <Sparkles size={17}/>
+              <b>Realtime VLM</b>
+              <button className={vlmLive?.running ? 'vlmToggleBtn softDanger' : 'vlmToggleBtn primary'} onClick={vlmLive?.running ? stopVlmLive : startVlmLive} disabled={aiBusy}>
+                {vlmLive?.running ? 'Tắt VLM' : 'Bật VLM'}
+              </button>
+              {pill(vlmLive?.running ? 'ok' : 'warn', vlmLive?.running ? 'running' : 'stopped')}
+            </div>
             <label className="intervalSelect">Interval
               <select value={vlmIntervalMs} onChange={e => setVlmIntervalMs(Number(e.target.value))}>
                 {[500, 1000, 1500, 2000, 3000, 5000].map(v => <option key={v} value={v}>{v}ms</option>)}
@@ -871,16 +894,6 @@ function App() {
         <p className="hint">Camera FPS và detector FPS là hai thứ khác nhau. Nếu AI overlay lag, chuyển về Video raw khi lái robot; dùng Detect khi cần nhận dạng.</p>
       </section>
 
-      <section className="card logs">
-        <div className="cardTitle"><Activity/> cmd_ack / logs</div>
-        <div className="logList" ref={logListRef} onScroll={() => { logStickRef.current = isNearBottom(logListRef.current); if (logStickRef.current) setLogUnread(false) }}>
-          {logs.map((l, i) => <div className={`log ${l.type}`} key={i}>
-            <div className="logHead"><b>{l.time}</b> <span>{l.message}</span> <em>{shortJson(l.data)}</em></div>
-            {l.data && <details><summary>Chi tiet JSON</summary><pre>{JSON.stringify(l.data, null, 2)}</pre></details>}
-          </div>)}
-        </div>
-        {logUnread && <button className="jumpBtn" onClick={scrollLogBottom}>Log moi ↓</button>}
-      </section>
       </section>
 
       <section className="sideStack">
@@ -900,24 +913,6 @@ function App() {
           <div className="cardTitle small"><Gauge/> Servo: {servoAngle}°</div>
           {[0,45,90,135,180].map(a => <button key={a} onClick={() => servo(a)} className={servoAngle === a ? 'selected' : ''}>{a}°</button>)}
         </div>
-      </section>
-
-      <section className="card voiceCard">
-        <div className="cardTitle"><Mic/> Điều khiển giọng nói</div>
-        <div className="voiceStatus">
-          {pill(voiceState?.running ? 'ok' : 'warn', voiceState?.running ? `Latched: ${voiceMotion}` : 'Voice idle')}
-          {pill(voiceListening ? 'ok' : 'warn', voiceListening ? 'Mic listening' : 'Mic off')}
-        </div>
-        <p className="hint">Nói: tiến, lùi, rẽ trái, rẽ phải, dừng lại. Lệnh giọng nói được backend gửi lặp mỗi 150ms; ESP vẫn tự dừng nếu quá TTL.</p>
-        <div className="voiceActions">
-          <button className={voiceListening ? 'selected' : 'primary'} onClick={toggleVoiceListening}><Mic size={16}/> {voiceListening ? 'Dừng nghe' : 'Bật mic'}</button>
-          <button className="softDanger" onClick={stopVoice}><ShieldAlert size={16}/> Dừng voice</button>
-        </div>
-        <form className="voiceInput" onSubmit={(e) => { e.preventDefault(); sendVoiceText(voiceText) }}>
-          <input value={voiceText} onChange={e => setVoiceText(e.target.value)} placeholder="Nhập thử: tiến / lùi / rẽ trái / dừng lại" />
-          <button type="submit">Gửi lệnh</button>
-        </form>
-        {voiceState?.last_error && <div className="inlineError">{voiceState.last_error}</div>}
       </section>
 
       <section className="card facts">
