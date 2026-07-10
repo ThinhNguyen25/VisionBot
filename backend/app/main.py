@@ -1037,73 +1037,12 @@ def _build_robot_answer_vi(caption: str, path_status: str, action: str, question
     return f"Phía trước: {caption}\n\nTình trạng: {status_vi}\n\nLời khuyên: {advice_vi}{extra}"
 
 
-def _answer_needs_vi_fallback(answer: str | None) -> bool:
-    text = (answer or "").strip().lower()
-    if not text:
-        return True
-    vi_marks = "ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ"
-    if any(ch in text for ch in vi_marks):
-        return False
-    english_robot_phrases = (
-        "the robot",
-        "the image",
-        "not using",
-        "esp32",
-        "camera",
-        "visible",
-        "person",
-        "foreground",
-        "holding",
-        "cell phone",
-        "object",
-        "people",
-        "dark background",
-        "no visible",
-    )
-    return any(phrase in text for phrase in english_robot_phrases)
+def _scene_vlm_answer(scene: dict[str, Any] | None) -> str:
+    if not isinstance(scene, dict):
+        return ""
+    return str(scene.get("answer_vi") or scene.get("caption_vi") or scene.get("caption") or "")
 
 
-def _fallback_robot_answer_vi(answer: str | None, detections: dict[str, Any], safety: dict[str, Any]) -> str:
-    dets = detections.get("detections", []) if isinstance(detections, dict) else []
-    names: list[str] = []
-    for det in dets[:5]:
-        label = det.get("label") or det.get("name") or "vật thể"
-        conf = det.get("confidence") or det.get("conf")
-        if isinstance(conf, (int, float)):
-            names.append(f"{label} {round(conf * 100)}%")
-        else:
-            names.append(str(label))
-
-    if names:
-        front = f"Detector đang thấy: {', '.join(names)}."
-    else:
-        front = "Khung hình hiện tại khá tối hoặc mờ, detector chưa nhận diện được vật thể rõ ràng."
-
-    action = (safety or {}).get("safe_action") or "slow_down"
-    advice = {
-        "go": "Có thể đi tiếp rất chậm nếu người điều khiển xác nhận đường phía trước trống.",
-        "slow_down": "Nên đi chậm, giữ khoảng cách và quan sát thêm trước khi tiến.",
-        "stop": "Nên dừng lại ngay để tránh va chạm.",
-        "turn": "Nên rẽ hoặc đổi hướng nếu phía trước không an toàn.",
-        "speed_up": "Chỉ nên tăng tốc nhẹ khi người điều khiển xác nhận đường thật sự trống.",
-    }.get(action, "Nên đi chậm và quan sát thêm.")
-
-    note = ""
-    if answer:
-        note = " VLM trả lời chưa đúng ngữ cảnh camera robot, nên hệ thống ưu tiên detector và luật an toàn."
-
-    return f"Phía trước: {front}\n\nTình trạng: Chưa đủ chắc chắn để kết luận đường hoàn toàn trống.{note}\n\nLời khuyên: {advice}"
-
-
-def _scene_answer_vi(scene: dict[str, Any] | None, detections: dict[str, Any], safety: dict[str, Any]) -> str:
-    answer = scene.get("answer_vi") if isinstance(scene, dict) else None
-    if _answer_needs_vi_fallback(answer):
-        answer = _fallback_robot_answer_vi(answer, detections, safety)
-        if isinstance(scene, dict):
-            scene["raw_answer_vi"] = scene.get("answer_vi")
-            scene["answer_vi"] = answer
-            scene["vi_fallback"] = True
-    return str(answer or "")
 
 
 def _robot_chat_prompt(question: str | None = None) -> str:
@@ -1703,7 +1642,7 @@ def build_ai_scene_result(device_id: str, frame: bytes, question: str | None = N
     if risky and safe_action == "go":
         safe_action = "slow_down"
     safety = {"risk_detected": risky, "safe_action": safe_action, "rule": "detector/VLM risky label override" if risky else "VLM robot action"}
-    answer = _scene_answer_vi(scene if isinstance(scene, dict) else None, detections, safety)
+    answer = _scene_vlm_answer(scene if isinstance(scene, dict) else None)
     return {"device_id": device_id, "question": question, "answer": answer, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
 
 
@@ -1998,7 +1937,7 @@ def ai_analyze(device_id: str):
     if risky and safe_action == "go":
         safe_action = "slow_down"
     safety = {"risk_detected": risky, "safe_action": safe_action, "rule": "detector/VLM risky label override" if risky else "VLM robot action"}
-    answer = _scene_answer_vi(scene if isinstance(scene, dict) else None, detections, safety)
+    answer = _scene_vlm_answer(scene if isinstance(scene, dict) else None)
     return {"device_id": device_id, "answer": answer, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
 
 
@@ -2021,7 +1960,7 @@ def ai_ask(device_id: str, req: AIAskRequest):
     if risky and safe_action == "go":
         safe_action = "slow_down"
     safety = {"risk_detected": risky, "safe_action": safe_action, "rule": "detector/VLM risky label override" if risky else "VLM robot action"}
-    answer = _scene_answer_vi(scene if isinstance(scene, dict) else None, detections, safety)
+    answer = _scene_vlm_answer(scene if isinstance(scene, dict) else None)
     return {"device_id": device_id, "question": req.question, "answer": answer, "detections": detections, "scene": scene, "safety": safety, "created_ms": now_ms()}
 
 
