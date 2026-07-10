@@ -19,3 +19,4 @@ safetensors>=0.4.0
 huggingface-hub>=0.30.0
 qwen-vl-utils>=0.0.8
 num2words>=0.5.13
+deep-translator>=1.11.4

@@ -8,6 +8,10 @@ const DEFAULT_API = import.meta.env.VITE_API_BASE || `${window.location.protocol
 const APP_VERSION = 'v1.4.0 realtime VLM + voice'
 const DRIVE_INTERVAL_MS = 120
 const DRIVE_TTL_MS = 500
+const DEFAULT_VLM_INSTRUCTION = 'Identify the main visible objects, describe the front environment and obstacle risk, then recommend whether the robot should go ahead, go slowly, turn, or stop. Be concrete and concise.'
+const DEFAULT_VLM_INSTRUCTION_VI = 'Nhận dạng các vật thể chính trong khung hình, mô tả môi trường phía trước và nguy cơ vật cản, rồi khuyên robot nên đi tiếp, đi chậm, rẽ hay dừng. Trả lời ngắn gọn, cụ thể.'
+const VOICE_COMMAND_RE = /(dừng|dung|stop|thôi|thoi|ngừng|ngung|tiến|tien|đi thẳng|di thang|thẳng|thang|lùi|lui|trái|trai|rẽ trái|re trai|phải|phai|rẽ phải|re phai|forward|back|left|right)/i
+const VOICE_STOP_RE = /(dừng|dung|stop|thôi|thoi|ngừng|ngung|đứng lại|dung lai|dừng lại)/i
 
 const FALLBACK_DETECTORS = [
   { id: 'yolo11n.onnx', label: 'ONNX — YOLO11n realtime', recommended_imgsz: 320, speed: 'realtime' },
@@ -153,8 +157,8 @@ function App() {
   const [aiUnread, setAiUnread] = React.useState(false)
   const [logUnread, setLogUnread] = React.useState(false)
   const [vlmLive, setVlmLive] = React.useState(null)
-  const [vlmInstruction, setVlmInstruction] = React.useState(localStorage.getItem('vlmInstruction') || 'Answer only in Vietnamese. What is in front of the robot? Describe briefly and give one safe driving direction recommendation.')
-  const [vlmInstructionVi, setVlmInstructionVi] = React.useState(localStorage.getItem('vlmInstructionVi') || 'Phía trước robot có gì? Hãy mô tả ngắn gọn và đưa ra một lời khuyên lái xe an toàn.')
+  const [vlmInstruction, setVlmInstruction] = React.useState(localStorage.getItem('vlmInstructionV2') || DEFAULT_VLM_INSTRUCTION)
+  const [vlmInstructionVi, setVlmInstructionVi] = React.useState(localStorage.getItem('vlmInstructionViV2') || DEFAULT_VLM_INSTRUCTION_VI)
   const [vlmIntervalMs, setVlmIntervalMs] = React.useState(Number(localStorage.getItem('vlmIntervalMs') || 1500))
   const [voiceState, setVoiceState] = React.useState(null)
   const [voiceListening, setVoiceListening] = React.useState(false)
@@ -179,6 +183,7 @@ function App() {
   const firstModelSyncRef = React.useRef(false)
   const recognitionRef = React.useRef(null)
   const servoTouchedRef = React.useRef(false)
+  const lastVoiceCommandRef = React.useRef({ text: '', ms: 0 })
 
   React.useEffect(() => {
     localStorage.setItem('apiBase', apiBase)
@@ -186,8 +191,8 @@ function App() {
   }, [apiBase, deviceId])
 
   React.useEffect(() => {
-    localStorage.setItem('vlmInstruction', vlmInstruction)
-    localStorage.setItem('vlmInstructionVi', vlmInstructionVi)
+    localStorage.setItem('vlmInstructionV2', vlmInstruction)
+    localStorage.setItem('vlmInstructionViV2', vlmInstructionVi)
     localStorage.setItem('vlmIntervalMs', String(vlmIntervalMs))
   }, [vlmInstruction, vlmInstructionVi, vlmIntervalMs])
 
@@ -653,7 +658,7 @@ function App() {
     const spoken = String(text || '').trim()
     if (!spoken) return
     const normalized = spoken.toLowerCase()
-    if (/(dừng|dung|stop|thôi|thoi|ngừng|ngung)/i.test(normalized)) {
+    if (VOICE_STOP_RE.test(normalized)) {
       setVoiceText(spoken)
       setVoiceProblem(`Nghe: ${spoken} -> dừng ngay`)
       await stopVoice()
@@ -671,7 +676,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: spoken })
       })
-      setVoiceState({ ...(data.voice || {}), last_error: data.ok ? null : (data.intent?.message || 'Lệnh giọng nói cần kèm thời lượng, ví dụ: tiến 5 giây.') })
+      setVoiceState({ ...(data.voice || {}), last_error: data.ok ? null : (data.intent?.message || 'Nói: tiến, lùi, trái, phải hoặc dừng.') })
       setVoiceProblem(data.ok ? `Đã gửi lệnh: ${spoken}` : `Không chạy: ${data.intent?.message || 'không nhận ra lệnh'}`)
       pushLog(data.ok ? 'ack' : 'err', `voice: ${spoken}`, data)
     } catch (err) {
@@ -705,7 +710,7 @@ function App() {
     const rec = new SpeechRecognition()
     recognitionRef.current = rec
     rec.lang = 'vi-VN'
-    rec.interimResults = false
+    rec.interimResults = true
     rec.continuous = true
     rec.onstart = () => {
       setVoiceListening(true)
@@ -718,9 +723,31 @@ function App() {
       pushLog('err', `voice recognition error: ${e.error || 'unknown'}`, e)
     }
     rec.onresult = (event) => {
-      const result = event.results[event.results.length - 1]
-      const text = result?.[0]?.transcript || ''
-      setVoiceProblem(text ? `Nghe: ${text}` : 'Mic nghe nhưng chưa ra chữ')
+      let finalText = ''
+      let interimText = ''
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i]
+        const text = result?.[0]?.transcript || ''
+        if (result?.isFinal) finalText += ` ${text}`
+        else interimText += ` ${text}`
+      }
+      const text = (finalText || interimText).trim()
+      if (!text) {
+        setVoiceProblem('Mic nghe nhưng chưa ra chữ')
+        return
+      }
+      setVoiceText(text)
+      const normalized = text.toLowerCase()
+      setVoiceProblem(finalText ? `Đã nhận: ${text}` : `Đang nghe: ${text}`)
+      if (!VOICE_COMMAND_RE.test(normalized)) return
+
+      const now = Date.now()
+      const last = lastVoiceCommandRef.current
+      const isStop = VOICE_STOP_RE.test(normalized)
+      const isFinal = Boolean(finalText)
+      if (!isStop && !isFinal && last.text === text && now - last.ms < 1200) return
+      if (!isStop && !isFinal && now - last.ms < 1200) return
+      lastVoiceCommandRef.current = { text, ms: now }
       sendVoiceText(text)
     }
     rec.start()

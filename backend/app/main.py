@@ -1037,26 +1037,62 @@ def _build_robot_answer_vi(caption: str, path_status: str, action: str, question
     return f"Phía trước: {caption}\n\nTình trạng: {status_vi}\n\nLời khuyên: {advice_vi}{extra}"
 
 
+VIETNAMESE_HINT_RE = re.compile(r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", re.I)
+ENGLISH_HINT_RE = re.compile(
+    r"\b(the|a|an|is|are|am|in front|behind|left|right|person|people|wall|white|black|"
+    r"phone|chair|table|room|object|objects|robot|camera|should|go|slow|stop|turn|"
+    r"visible|holding|standing|sitting|foreground|background)\b",
+    re.I,
+)
+
+
+def _looks_like_english(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value or VIETNAMESE_HINT_RE.search(value):
+        return False
+    return bool(ENGLISH_HINT_RE.search(value))
+
+
+def _translate_en_to_vi(text: str) -> tuple[str, str | None]:
+    value = str(text or "").strip()
+    if not _looks_like_english(value):
+        return value, None
+    try:
+        from deep_translator import GoogleTranslator
+        translated = GoogleTranslator(source="en", target="vi").translate(value)
+        translated = str(translated or "").strip()
+        if translated:
+            return translated, "deep-translator/google"
+    except Exception:
+        pass
+    return value, None
+
+
 def _scene_vlm_answer(scene: dict[str, Any] | None) -> str:
     if not isinstance(scene, dict):
         return ""
-    return str(scene.get("answer_vi") or scene.get("caption_vi") or scene.get("caption") or "")
+    raw = str(scene.get("answer_vi") or scene.get("caption_vi") or scene.get("caption") or "").strip()
+    answer, provider = _translate_en_to_vi(raw)
+    if answer:
+        scene["answer_vi"] = answer
+    if provider:
+        scene["answer_raw"] = raw
+        scene["answer_translation_provider"] = provider
+    return answer
 
 
 
 
 def _robot_chat_prompt(question: str | None = None) -> str:
     user_question = (question or "").strip()
-    task = user_question[:600] if user_question else "Hãy phân tích khung hình hiện tại cho người đang điều khiển robot."
+    task = user_question[:600] if user_question else "Identify objects, describe the front environment, and recommend robot movement."
     return (
         "You are the vision assistant for a small ESP32-CAM robot.\n"
-        "Look at the front-camera image and answer in natural Vietnamese.\n"
+        "Look at the camera image and answer in natural Vietnamese. If you accidentally answer in English, the server will translate it, but you should prefer Vietnamese.\n"
         "Do not output JSON, markdown tables, code blocks, or raw debug fields.\n"
-        "Use this exact friendly structure:\n"
-        "Phía trước: one short sentence describing the scene, main objects, people, vehicles, or obstacles.\n"
-        "Tình trạng: choose clear, crowded, blocked, or uncertain, then explain briefly.\n"
-        "Lời khuyên: choose go, slow_down, stop, or turn, then give a safe driving suggestion.\n"
-        "If the image is blurry or uncertain, say you are not sure and recommend slow_down.\n"
+        "Give three concise parts: 1) visible objects, 2) front environment/obstacle risk, 3) driving advice: go ahead, go slowly, turn, or stop.\n"
+        "Do not force a fixed answer. Describe what you actually see, even if it is only a person, wall, table, phone, or a dark/blurry frame.\n"
+        "If the image is blurry, dark, or uncertain, say that and recommend going slowly or stopping.\n"
         f"User question: {task}"
     )
 
