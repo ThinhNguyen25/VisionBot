@@ -159,6 +159,7 @@ function App() {
   const [voiceState, setVoiceState] = React.useState(null)
   const [voiceListening, setVoiceListening] = React.useState(false)
   const [voiceText, setVoiceText] = React.useState('')
+  const [voiceProblem, setVoiceProblem] = React.useState('')
   const [realtimeApiOk, setRealtimeApiOk] = React.useState(true)
   const [mobileHeaderOpen, setMobileHeaderOpen] = React.useState(false)
   const [modelForm, setModelForm] = React.useState({
@@ -654,6 +655,7 @@ function App() {
     const normalized = spoken.toLowerCase()
     if (/(dừng|dung|stop|thôi|thoi|ngừng|ngung)/i.test(normalized)) {
       setVoiceText(spoken)
+      setVoiceProblem(`Nghe: ${spoken} -> dừng ngay`)
       await stopVoice()
       return
     }
@@ -662,6 +664,7 @@ function App() {
       return
     }
     setVoiceText(spoken)
+    setVoiceProblem(`Nghe: ${spoken}`)
     try {
       const data = await api(`/api/robots/${deviceId}/control/voice`, {
         method: 'POST',
@@ -669,9 +672,11 @@ function App() {
         body: JSON.stringify({ text: spoken })
       })
       setVoiceState({ ...(data.voice || {}), last_error: data.ok ? null : (data.intent?.message || 'Lệnh giọng nói cần kèm thời lượng, ví dụ: tiến 5 giây.') })
+      setVoiceProblem(data.ok ? `Đã gửi lệnh: ${spoken}` : `Không chạy: ${data.intent?.message || 'không nhận ra lệnh'}`)
       pushLog(data.ok ? 'ack' : 'err', `voice: ${spoken}`, data)
     } catch (err) {
       setVoiceState(prev => ({ ...(prev || {}), running: false, last_error: `Voice lỗi: ${err?.detail || err?.error || err?.message || 'backend_error'}` }))
+      setVoiceProblem(`Voice lỗi: ${err?.detail || err?.error || err?.message || 'backend_error'}`)
       pushLog('err', `voice failed: ${spoken}`, err)
     }
   }
@@ -689,6 +694,7 @@ function App() {
   const toggleVoiceListening = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
+      setVoiceProblem('Trình duyệt không hỗ trợ Web Speech API. Hãy dùng Chrome/Edge.')
       pushLog('err', 'Trình duyệt không hỗ trợ Web Speech API. Dùng Chrome/Edge hoặc nhập lệnh bằng ô text.', {})
       return
     }
@@ -701,15 +707,20 @@ function App() {
     rec.lang = 'vi-VN'
     rec.interimResults = false
     rec.continuous = true
-    rec.onstart = () => setVoiceListening(true)
+    rec.onstart = () => {
+      setVoiceListening(true)
+      setVoiceProblem(window.isSecureContext ? 'Mic đang nghe...' : 'Mic có thể bị chặn vì đang mở bằng HTTP trên điện thoại.')
+    }
     rec.onend = () => setVoiceListening(false)
     rec.onerror = (e) => {
       setVoiceListening(false)
+      setVoiceProblem(`Mic lỗi: ${e.error || 'unknown'}`)
       pushLog('err', `voice recognition error: ${e.error || 'unknown'}`, e)
     }
     rec.onresult = (event) => {
       const result = event.results[event.results.length - 1]
       const text = result?.[0]?.transcript || ''
+      setVoiceProblem(text ? `Nghe: ${text}` : 'Mic nghe nhưng chưa ra chữ')
       sendVoiceText(text)
     }
     rec.start()
@@ -765,6 +776,11 @@ function App() {
     ? `${voiceMotion}${voiceRemaining != null ? ` ${voiceRemaining}s` : ' đến khi dừng'}`
     : (voiceState?.last_error || (voiceListening ? 'đang nghe' : 'idle'))
 
+  const voiceLastText = voiceText || voiceState?.last_text || '-'
+  const voiceReason = voiceProblem || voiceState?.last_error || (voiceListening ? 'Mic đang nghe...' : (voiceState?.running ? voiceStatusText : 'Bấm mic rồi nói: tiến, lùi, trái, phải, dừng'))
+  const voiceTopState = voiceState?.last_error || voiceReason.startsWith('Mic lỗi') || voiceReason.startsWith('Voice lỗi') || voiceReason.startsWith('Không chạy') ? 'bad' : ((voiceListening || voiceState?.running) ? 'ok' : 'warn')
+  const voiceTopText = voiceState?.running ? `Voice ${voiceStatusText}` : (voiceListening ? 'Voice đang nghe' : 'Voice idle')
+
   return <div className="app">
     <header className={`hero ${mobileHeaderOpen ? 'mobileOpen' : ''}`}>
       <div>
@@ -780,6 +796,9 @@ function App() {
           {pill(backendStatus === 'ready' ? 'ok' : 'warn', `Backend ${backendStatus}`)}
           {pill(health?.mqtt_connected ? 'ok' : 'bad', `MQTT ${mqttState}`)}
           {pill(cameraPillState, `Camera ${cameraStatus}`)}
+          <span className={`pill voiceTop ${voiceTopState}`} title={`Đã nói: ${voiceLastText} | ${voiceReason}`}>
+            <span><b>{voiceTopText}</b><small>Đã nói: {voiceLastText} · {voiceReason}</small></span>
+          </span>
           {pill(robotPillState, robot?.online ? 'Robot online' : 'Robot offline')}
           {pill(robotMqttOk ? 'ok' : 'bad', robotMqttOk ? 'Robot MQTT OK' : 'Robot MQTT loi')}
         </div>
