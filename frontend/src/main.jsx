@@ -651,6 +651,12 @@ function App() {
   const sendVoiceText = async (text) => {
     const spoken = String(text || '').trim()
     if (!spoken) return
+    const normalized = spoken.toLowerCase()
+    if (/(dừng|dung|stop|thôi|thoi|ngừng|ngung)/i.test(normalized)) {
+      setVoiceText(spoken)
+      await stopVoice()
+      return
+    }
     if (!realtimeApiOk) {
       setVoiceState({ running: false, last_error: 'Backend đang chạy bản cũ, thiếu endpoint /control/voice.' })
       return
@@ -747,14 +753,16 @@ function App() {
 
   const vlmLiveAnswer = vlmLive?.last_answer || vlmLive?.last_result?.answer || vlmLive?.last_result?.scene?.answer_vi || ''
   const vlmLiveSafety = vlmLive?.last_safety || vlmLive?.last_result?.safety || null
-  const streamFps = cam.stream_fps ?? cam.fps ?? '-'
+  const streamFpsRaw = Number(cam.stream_fps ?? cam.fps ?? 0)
+  const streamFps = streamFpsRaw > 0 ? streamFpsRaw.toFixed(1).replace(/\.0$/, '') : '-'
+  const liveStreamActive = videoOn && cameraStatus === 'online' && streamFpsRaw > 0
   const aiFps = detMetric?.approx_fps ?? yolo.approx_detect_fps ?? yolo.inference_fps ?? '-'
   const vlmFps = vlmMetric?.approx_fps ?? vlm.inference_fps ?? '-'
   const modelState = vlm?.loaded ? 'VLM loaded' : (vlm?.enabled ? 'VLM enabled' : 'VLM off')
   const voiceMotion = voiceState?.desired_motion || 'stop'
   const voiceRemaining = voiceState?.remaining_s ?? (voiceState?.remaining_ms != null ? Math.round(voiceState.remaining_ms / 100) / 10 : null)
   const voiceStatusText = voiceState?.running
-    ? `${voiceMotion} ${voiceRemaining ?? '-'}s`
+    ? `${voiceMotion}${voiceRemaining != null ? ` ${voiceRemaining}s` : ' đến khi dừng'}`
     : (voiceState?.last_error || (voiceListening ? 'đang nghe' : 'idle'))
 
   return <div className="app">
@@ -897,7 +905,11 @@ function App() {
             <button onClick={() => applyAiConfig({ enable_vlm: true, vlm_model: modelForm.vlm_model })}><Sparkles size={16}/> Bật VLM</button>
           </div>
         </div>
-        <div className="videoFrame">
+        <div
+          className={`videoFrame ${liveStreamActive ? 'isLive' : 'isIdle'}`}
+          data-fps={liveStreamActive ? `${streamFps} FPS` : 'FPS -'}
+          data-live="LIVE"
+        >
           {videoOn ? <img src={videoUrl} alt="VisionBot stream" /> : <div className="placeholder">Bấm Video raw hoặc AI overlay để bắt đầu stream</div>}
         </div>
         <p className="hint">Camera FPS và detector FPS là hai thứ khác nhau. Nếu AI overlay lag, chuyển về Video raw khi lái robot; dùng Detect khi cần nhận dạng.</p>

@@ -254,7 +254,7 @@ kbd { font-size: 11px; color: inherit; background: transparent; border-radius: 0
 }
 
 .videoFrame::before {
-  content: "30 FPS";
+  content: attr(data-fps);
   position: absolute;
   z-index: 2;
   top: 16px;
@@ -265,7 +265,7 @@ kbd { font-size: 11px; color: inherit; background: transparent; border-radius: 0
 }
 
 .videoFrame::after {
-  content: "LIVE";
+  content: attr(data-live);
   position: absolute;
   z-index: 2;
   top: 16px;
@@ -273,6 +273,26 @@ kbd { font-size: 11px; color: inherit; background: transparent; border-radius: 0
   font-size: 14px;
   font-weight: 950;
   text-shadow: 0 2px 8px rgba(0,0,0,.8);
+}
+
+.videoFrame.isLive::after {
+  content: "● LIVE";
+  color: #fff;
+  background: rgba(255, 46, 82, .92);
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: 999px;
+  padding: 5px 10px;
+  box-shadow: 0 0 18px rgba(255, 46, 82, .55);
+  animation: livePulse 1s ease-in-out infinite;
+}
+
+.videoFrame.isIdle::after {
+  color: rgba(255,255,255,.78);
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: .65; transform: scale(.98); }
+  50% { opacity: 1; transform: scale(1); }
 }
 
 .videoFrame img {

@@ -1051,6 +1051,10 @@ def _answer_needs_vi_fallback(answer: str | None) -> bool:
         "esp32",
         "camera",
         "visible",
+        "person",
+        "foreground",
+        "holding",
+        "cell phone",
         "object",
         "people",
         "dark background",
@@ -1760,24 +1764,21 @@ def parse_voice_intent(text: str) -> dict[str, Any]:
     if not t:
         return {"intent": "unknown", "action": None}
     if any(x in t for x in ["dừng", "dung", "stop", "đứng lại", "dừng lại", "thôi", "ngừng"]):
-        return {"intent": "stop", "action": "stop", "duration_s": 0}
+        return {"intent": "stop", "action": "stop", "duration_s": 0, "duration_limited": True}
 
     duration_s = _extract_voice_duration_s(t)
+    duration_limited = duration_s is not None
     if duration_s is None:
-        return {
-            "intent": "duration_required",
-            "action": None,
-            "message": "Hãy nói kèm thời lượng, ví dụ: 'tiến 5 giây', 'lùi 3 giây', 'trái 2 giây'.",
-        }
+        duration_s = 0
 
     if any(x in t for x in ["tiến", "tien", "đi thẳng", "di thang", "thẳng", "forward"]):
-        return {"intent": "drive", "action": "forward", "duration_s": duration_s}
+        return {"intent": "drive", "action": "forward", "duration_s": duration_s, "duration_limited": duration_limited}
     if any(x in t for x in ["lùi", "lui", "back", "backward"]):
-        return {"intent": "drive", "action": "backward", "duration_s": duration_s}
+        return {"intent": "drive", "action": "backward", "duration_s": duration_s, "duration_limited": duration_limited}
     if any(x in t for x in ["trái", "trai", "rẽ trái", "re trai", "left"]):
-        return {"intent": "drive", "action": "left", "duration_s": duration_s}
+        return {"intent": "drive", "action": "left", "duration_s": duration_s, "duration_limited": duration_limited}
     if any(x in t for x in ["phải", "phai", "rẽ phải", "re phai", "right"]):
-        return {"intent": "drive", "action": "right", "duration_s": duration_s}
+        return {"intent": "drive", "action": "right", "duration_s": duration_s, "duration_limited": duration_limited}
     if any(x in t for x in ["bật đèn", "bat den", "tắt đèn", "tat den"]):
         return {"intent": "unsupported", "action": "light", "message": "Firmware hiện tại chưa có endpoint điều khiển đèn."}
     return {"intent": "unknown", "action": None}
@@ -1807,12 +1808,13 @@ def voice_latch_loop(device_id: str) -> None:
                 return
             desired = state.get("desired_motion")
             end_ms = int(state.get("end_ms") or 0)
+            duration_limited = bool(state.get("duration_limited"))
             remaining_ms = max(0, end_ms - now_ms()) if end_ms else 0
             state["remaining_ms"] = remaining_ms
-            state["remaining_s"] = round(remaining_ms / 1000.0, 1)
+            state["remaining_s"] = round(remaining_ms / 1000.0, 1) if duration_limited else None
         if not desired or desired == "stop":
             return
-        if remaining_ms <= 0:
+        if duration_limited and remaining_ms <= 0:
             try:
                 publish_mqtt_or_503(topic_for(device_id, "cmd/drive"), {"seq": command_seq(), "cmd": "stop", "ttl_ms": 300, "mode": "manual", "source": "voice_timed_done"}, qos=0, timeout_s=0.5)
             except Exception:
@@ -1835,9 +1837,10 @@ def voice_latch_loop(device_id: str) -> None:
                     state["state"] = "publishing"
                     state["last_publish_ms"] = now_ms()
                     end_ms = int(state.get("end_ms") or 0)
+                    duration_limited = bool(state.get("duration_limited"))
                     remaining_ms = max(0, end_ms - now_ms()) if end_ms else 0
                     state["remaining_ms"] = remaining_ms
-                    state["remaining_s"] = round(remaining_ms / 1000.0, 1)
+                    state["remaining_s"] = round(remaining_ms / 1000.0, 1) if duration_limited else None
                     state["last_error"] = None
         except Exception as exc:
             with runtime_lock:
@@ -1860,13 +1863,13 @@ def voice_latch_snapshot(device_id: str) -> dict[str, Any]:
         state = dict(voice_latches.get(device_id) or {"running": False, "state": "stopped", "desired_motion": "stop", "remaining_ms": 0, "remaining_s": 0})
     updated = state.get("updated_ms") or state.get("last_publish_ms")
     state["age_ms"] = None if updated is None else now_ms() - int(updated)
-    if state.get("running") and state.get("end_ms"):
+    if state.get("running") and state.get("duration_limited") and state.get("end_ms"):
         remaining_ms = max(0, int(state["end_ms"]) - now_ms())
         state["remaining_ms"] = remaining_ms
         state["remaining_s"] = round(remaining_ms / 1000.0, 1)
     else:
         state["remaining_ms"] = int(state.get("remaining_ms") or 0)
-        state["remaining_s"] = round(state["remaining_ms"] / 1000.0, 1)
+        state["remaining_s"] = round(state["remaining_ms"] / 1000.0, 1) if state.get("duration_limited") else None
     return state
 
 
@@ -2067,8 +2070,9 @@ def voice_command(device_id: str, req: VoiceCommandRequest):
 
     desired = intent["action"]
     duration_s = float(intent.get("duration_s") or 0)
+    duration_limited = bool(intent.get("duration_limited"))
     started_ms = now_ms()
-    end_ms = started_ms + int(duration_s * 1000)
+    end_ms = started_ms + int(duration_s * 1000) if duration_limited else None
     assert_robot_command_allowed(device_id, "drive")
     with runtime_lock:
         state = voice_latches.setdefault(device_id, {})
@@ -2078,10 +2082,11 @@ def voice_command(device_id: str, req: VoiceCommandRequest):
             "state": "starting" if not already_running else "publishing",
             "desired_motion": desired,
             "duration_s": duration_s,
+            "duration_limited": duration_limited,
             "started_ms": started_ms,
             "end_ms": end_ms,
-            "remaining_ms": max(0, end_ms - now_ms()),
-            "remaining_s": round(max(0, end_ms - now_ms()) / 1000.0, 1),
+            "remaining_ms": max(0, end_ms - now_ms()) if end_ms else 0,
+            "remaining_s": round(max(0, end_ms - now_ms()) / 1000.0, 1) if end_ms else None,
             "last_text": req.text,
             "updated_ms": now_ms(),
             "last_error": None,
