@@ -1,0 +1,86 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: visionbot-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://camera-relay:8001
+    depends_on:
+      - camera-relay
+
+  camera-relay:
+    build:
+      context: ./camera-relay
+    container_name: visionbot-camera-relay
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      CAMERA_TOKEN: ${CAMERA_TOKEN:-demo_camera}
+      BACKEND_TOKEN: ${BACKEND_TOKEN:-demo_backend}
+      MAX_FRAME_SIZE_BYTES: "120000"
+      CAMERA_TIMEOUT_SEC: "10"
+
+  vlm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: visionbot-vlm
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    command:
+      - -hf
+      - ggml-org/SmolVLM-500M-Instruct-GGUF
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+
+  backend:
+    build:
+      context: ./backend
+    container_name: visionbot-backend
+    restart: unless-stopped
+    depends_on:
+      - camera-relay
+      - vlm
+    ports:
+      - "8000:8000"
+    environment:
+      MQTT_HOST: ${MQTT_HOST:-broker.emqx.io}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_BASE_TOPIC: ${MQTT_BASE_TOPIC:-visionbot}
+      COMMAND_ACK_TIMEOUT_S: "3.0"
+      AI_DEVICE: cpu
+      AI_ENABLE_YOLO: "1"
+      AI_YOLO_MODEL: yolo11n.onnx
+      AI_YOLO_IMGSZ: "320"
+      AI_CONF_THRESHOLD: "0.25"
+      AI_DETECT_INTERVAL_S: "0.20"
+      AI_ENABLE_VLM: "1"
+      AI_VLM_PROVIDER: llama_server
+      AI_VLM_MODEL: ggml-org/SmolVLM-500M-Instruct-GGUF
+      AI_VLM_OPENAI_BASE_URL: http://vlm:8080
+      AI_VLM_TIMEOUT_S: "30"
+      AI_VLM_MAX_NEW_TOKENS: "48"
+      AI_MODEL_DIR: /app/models
+      CAMERA_RELAY_WS: ws://camera-relay:8001/camera/ws/subscribe/{device_id}
+      CAMERA_RELAY_TOKEN: ${BACKEND_TOKEN:-demo_backend}
+    volumes:
+      - ai_models:/app/models
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: visionbot-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  ai_models:
+  hf_cache:

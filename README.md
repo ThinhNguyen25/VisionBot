@@ -64,6 +64,27 @@ scripts/       Script cai/chay WSL
 
 ## 3. Chay nhanh Local LAN
 
+### 3.0 Mot lenh Docker cho demo tren laptop
+
+Chay tat ca service local bang Docker Compose: MQTT broker, backend, frontend, camera-relay va VLM llama-server.
+
+```bash
+cd ~/visionbot/VisionBot-main
+docker compose up -d --build
+```
+
+Neu muon xem log:
+
+```bash
+docker compose logs -f backend frontend camera-relay vlm
+```
+
+Dashboard:
+
+```text
+http://localhost:5173
+```
+
 Terminal 1 - MQTT local:
 
 ```bash
@@ -106,6 +127,93 @@ Trong setup portal ESP dien Wi-Fi, MQTT host la IP laptop trong cung mang, MQTT 
 ## 4. Internet / Cloudflare Tunnel
 
 Cloudflare Tunnel free expose duoc HTTPS/WSS cho backend/camera, nhung khong expose MQTT TCP 1883. Vi vay MQTT nen dung VPS Mosquitto hoac broker cloud rieng.
+
+### 4.0 Nhanh nhat: mot lenh Docker cho Internet mode
+
+Muc tieu:
+
+```text
+ESP32-CAM -> Internet Wi-Fi bat ky 2.4GHz
+ESP32-CAM -> MQTT cloud public de nhan lenh
+ESP32-CAM -> Cloudflare Tunnel WSS de day frame camera
+Laptop -> Docker backend/frontend/VLM de dieu khien va AI
+```
+
+Chay tren WSL:
+
+```bash
+cd ~/visionbot/VisionBot-main
+MQTT_HOST=broker.emqx.io MQTT_PORT=1883 CAMERA_TOKEN=demo_camera BACKEND_TOKEN=demo_backend \
+docker compose -f docker-compose.internet.yml up -d --build
+```
+
+Lenh tren tu bat:
+
+```text
+camera-relay
+cloudflared quick tunnel
+backend FastAPI
+frontend dashboard
+SmolVLM llama-server Docker
+```
+
+Lay link Cloudflare cho ESP32-CAM:
+
+```bash
+docker compose -f docker-compose.internet.yml logs -f cloudflared
+```
+
+Tim dong co dang:
+
+```text
+https://abc-xyz.trycloudflare.com
+```
+
+ESP32-CAM dung firmware Internet Push:
+
+```text
+firmware/VisionBot_ESP32CAM_INTERNET_PUSH/VisionBot_ESP32CAM_INTERNET_PUSH.ino
+```
+
+Vao portal ESP32-CAM va dien:
+
+```text
+Wi-Fi SSID: Wi-Fi bat ky 2.4GHz co Internet
+Wi-Fi password: mat khau Wi-Fi do
+
+MQTT broker host/IP: broker.emqx.io
+MQTT broker port: 1883
+MQTT username: de trong
+MQTT password: de trong
+
+Camera relay host/domain: abc-xyz.trycloudflare.com
+Camera relay port: 443
+Camera relay TLS: 1
+Camera relay token: demo_camera
+```
+
+Mo dashboard tren laptop:
+
+```text
+http://localhost:5173
+```
+
+Trong o Backend API de:
+
+```text
+http://localhost:8000
+```
+
+Kiem tra:
+
+```bash
+curl http://localhost:8000/api/health
+curl http://localhost:8000/api/robots
+```
+
+Neu thay `mqtt_connected:true`, robot online va camera co frame la dung. Luc nay ESP32-CAM va laptop khong can chung Wi-Fi; chi can ca hai co Internet.
+
+Luu y demo: `broker.emqx.io` la broker public, ai cung co the subscribe topic neu biet topic. Khi bao ve do an that, nen dung VPS Mosquitto rieng co username/password.
 
 ### 4.1 Direct backend push qua Cloudflare
 

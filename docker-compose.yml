@@ -18,6 +18,7 @@ services:
     depends_on:
       - mqtt
       - camera-relay
+      - vlm
     ports:
       - "8000:8000"
     environment:
@@ -33,16 +34,33 @@ services:
       AI_YOLO_IMGSZ: "320"
       AI_CONF_THRESHOLD: "0.25"
       AI_DETECT_INTERVAL_S: "0.20"
-      AI_ENABLE_VLM: "0"
+      AI_ENABLE_VLM: "${AI_ENABLE_VLM:-1}"
       AI_VLM_PROVIDER: llama_server
       AI_VLM_MODEL: ggml-org/SmolVLM-500M-Instruct-GGUF
-      AI_VLM_OPENAI_BASE_URL: http://host.docker.internal:8080
-      AI_VLM_TIMEOUT_S: "25"
+      AI_VLM_OPENAI_BASE_URL: http://vlm:8080
+      AI_VLM_TIMEOUT_S: "30"
+      AI_VLM_MAX_NEW_TOKENS: "48"
       AI_MODEL_DIR: /app/models
       CAMERA_RELAY_WS: ws://camera-relay:8001/camera/ws/subscribe/{device_id}
       CAMERA_RELAY_TOKEN: ""
     volumes:
       - ai_models:/app/models
+
+  vlm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: visionbot-vlm
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    command:
+      - -hf
+      - ggml-org/SmolVLM-500M-Instruct-GGUF
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
 
   camera-relay:
     build:
@@ -71,3 +89,4 @@ volumes:
   mqtt_data:
   mqtt_log:
   ai_models:
+  hf_cache:
