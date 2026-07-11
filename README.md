@@ -50,6 +50,8 @@ backend nhan JPEG frame
 
 ESP32-CAM khong can biet IP laptop. Laptop/backend khong can biet IP ESP.
 
+Internet Push firmware mac dinh gui frame moi 40ms, tuc muc tieu khoang 25 FPS cho raw stream. Qua Cloudflare quick tunnel/public Wi-Fi, FPS thuc te co the thap hon neu mang yeu. Neu bi giat/mat ket noi, tang `VISIONBOT_PUSH_INTERVAL_MS` trong firmware len 66 hoac 100.
+
 ## 2. Thanh phan chinh
 
 ```text

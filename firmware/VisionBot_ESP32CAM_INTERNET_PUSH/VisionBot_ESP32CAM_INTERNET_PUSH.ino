@@ -80,7 +80,9 @@
 #define VISIONBOT_PUSH_PORT 443
 #define VISIONBOT_PUSH_BASE_PATH "/camera/ws/push"
 #define VISIONBOT_PUSH_TOKEN ""
-#define VISIONBOT_PUSH_INTERVAL_MS 200
+// Camera push target. 40 ms is about 25 FPS; raise to 66-100 ms if the
+// public tunnel/Wi-Fi becomes unstable.
+#define VISIONBOT_PUSH_INTERVAL_MS 40
 
 // ================= CAMERA MODEL: AI THINKER =================
 #define PWDN_GPIO_NUM     32
