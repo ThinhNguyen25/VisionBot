@@ -56,7 +56,7 @@
 
 // ================= FIRMWARE =================
 #define FW_NAME    "visionbot-esp32cam"
-#define FW_VERSION "1.3.2-esp32cam-internet-push-qvga-bright-25fps"
+#define FW_VERSION "1.3.3-esp32cam-internet-push-25fps-fixed-ap"
 
 // ================= WIFI / MQTT DEFAULTS =================
 // Internet mode should use WiFiManager portal instead of a fixed laptop hotspot.
@@ -152,11 +152,11 @@ bool cameraPushConnected = false;
 unsigned long lastFrameMs = 0;
 unsigned long lastPushFrameMs = 0;
 const unsigned long FRAME_INTERVAL_MS = 33;  // ~30 FPS target
-const uint32_t CAMERA_XCLK_HZ = 20000000;    // XCLK 20 MHz for better camera throughput.
-const framesize_t CAMERA_FRAME_SIZE_PSRAM = FRAMESIZE_QVGA;    // 320x240: stable 20-25 FPS over cloud.
-const framesize_t CAMERA_FRAME_SIZE_NO_PSRAM = FRAMESIZE_QQVGA; // 160x120 fallback for no-PSRAM boards.
-const int CAMERA_JPEG_QUALITY_PSRAM = 18;    // Balanced quality; higher number = smaller/lower quality JPEG.
-const int CAMERA_JPEG_QUALITY_NO_PSRAM = 24;
+const uint32_t CAMERA_XCLK_HZ = 20000000;    // 20 MHz keeps cloud push near 20-25 FPS on ESP32-CAM.
+const framesize_t CAMERA_FRAME_SIZE_PSRAM = FRAMESIZE_QVGA;    // 320x240
+const framesize_t CAMERA_FRAME_SIZE_NO_PSRAM = FRAMESIZE_QQVGA; // 160x120 fallback
+const int CAMERA_JPEG_QUALITY_PSRAM = 22;    // Higher number = smaller/lower quality JPEG
+const int CAMERA_JPEG_QUALITY_NO_PSRAM = 26;
 
 bool mqttEverConnected = false;
 unsigned long lastMqttAttemptMs = 0;
@@ -874,13 +874,12 @@ bool initCamera() {
     if (s->set_framesize) s->set_framesize(s, frameSize);
     if (s->set_quality) s->set_quality(s, jpegQuality);
 
-    // Presentation profile: clearer and brighter than the low-bandwidth QVGA setup.
-    if (s->set_brightness) s->set_brightness(s, 1);
+    // Stable cloud profile: QVGA + moderate JPEG keeps FPS high and avoids relay lag.
+    if (s->set_brightness) s->set_brightness(s, 0);
     if (s->set_contrast) s->set_contrast(s, 1);
     if (s->set_saturation) s->set_saturation(s, 0);
     if (s->set_whitebal) s->set_whitebal(s, 1);
     if (s->set_aec2) s->set_aec2(s, 1);
-    if (s->set_ae_level) s->set_ae_level(s, 1);
     if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 1);
     if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
     if (s->set_raw_gma) s->set_raw_gma(s, 1);
