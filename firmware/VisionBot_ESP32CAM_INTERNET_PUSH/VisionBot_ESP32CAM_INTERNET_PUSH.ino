@@ -228,6 +228,8 @@ String q(const String &s) {
   return "\"" + jsonEscape(s) + "\"";
 }
 
+void publishSecurityEvent(const String &eventType, const String &detail, const String &severity = "info");
+
 String boolStr(bool v) {
   return v ? "true" : "false";
 }
@@ -1103,7 +1105,7 @@ String makeTelemetryPayload() {
 }
 
 // ================= MQTT =================
-void publishSecurityEvent(const String &eventType, const String &detail, const String &severity = "info") {
+void publishSecurityEvent(const String &eventType, const String &detail, const String &severity) {
   lastSecurityEvent = eventType;
   securityEventCount++;
 
