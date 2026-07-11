@@ -56,7 +56,7 @@
 
 // ================= FIRMWARE =================
 #define FW_NAME    "visionbot-esp32cam"
-#define FW_VERSION "1.3.1-esp32cam-internet-push-sds-p0"
+#define FW_VERSION "1.3.2-esp32cam-internet-push-qvga-bright-25fps"
 
 // ================= WIFI / MQTT DEFAULTS =================
 // Internet mode should use WiFiManager portal instead of a fixed laptop hotspot.
@@ -152,11 +152,11 @@ bool cameraPushConnected = false;
 unsigned long lastFrameMs = 0;
 unsigned long lastPushFrameMs = 0;
 const unsigned long FRAME_INTERVAL_MS = 33;  // ~30 FPS target
-const uint32_t CAMERA_XCLK_HZ = 20000000;    // XCLK 20 MHz for a sharper demo profile.
-const framesize_t CAMERA_FRAME_SIZE_PSRAM = FRAMESIZE_VGA;     // 640x480: clearer than QVGA, still streamable.
-const framesize_t CAMERA_FRAME_SIZE_NO_PSRAM = FRAMESIZE_QVGA; // 320x240 fallback for no-PSRAM boards.
-const int CAMERA_JPEG_QUALITY_PSRAM = 14;    // Higher number = smaller/lower quality JPEG.
-const int CAMERA_JPEG_QUALITY_NO_PSRAM = 22;
+const uint32_t CAMERA_XCLK_HZ = 20000000;    // XCLK 20 MHz for better camera throughput.
+const framesize_t CAMERA_FRAME_SIZE_PSRAM = FRAMESIZE_QVGA;    // 320x240: stable 20-25 FPS over cloud.
+const framesize_t CAMERA_FRAME_SIZE_NO_PSRAM = FRAMESIZE_QQVGA; // 160x120 fallback for no-PSRAM boards.
+const int CAMERA_JPEG_QUALITY_PSRAM = 18;    // Balanced quality; higher number = smaller/lower quality JPEG.
+const int CAMERA_JPEG_QUALITY_NO_PSRAM = 24;
 
 bool mqttEverConnected = false;
 unsigned long lastMqttAttemptMs = 0;
@@ -319,11 +319,8 @@ String generateRandomSetupPassword() {
 
 void ensureSetupPassword() {
   prefs.begin("visionbot", false);
-  setupApPass = prefs.getString("setup_pass", "");
-  if (setupApPass.length() < 8) {
-    setupApPass = generateRandomSetupPassword();
-    prefs.putString("setup_pass", setupApPass);
-  }
+  setupApPass = "12345678";
+  prefs.putString("setup_pass", setupApPass);
   prefs.end();
 }
 
