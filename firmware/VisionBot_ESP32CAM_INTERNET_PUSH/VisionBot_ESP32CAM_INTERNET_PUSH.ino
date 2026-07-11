@@ -152,11 +152,11 @@ bool cameraPushConnected = false;
 unsigned long lastFrameMs = 0;
 unsigned long lastPushFrameMs = 0;
 const unsigned long FRAME_INTERVAL_MS = 33;  // ~30 FPS target
-const uint32_t CAMERA_XCLK_HZ = 15000000;    // XCLK 15 MHz: smoother in current OV3660 test
-const framesize_t CAMERA_FRAME_SIZE_PSRAM = FRAMESIZE_QVGA;    // 320x240
-const framesize_t CAMERA_FRAME_SIZE_NO_PSRAM = FRAMESIZE_QQVGA; // 160x120 fallback
-const int CAMERA_JPEG_QUALITY_PSRAM = 22;    // Higher number = smaller/lower quality JPEG
-const int CAMERA_JPEG_QUALITY_NO_PSRAM = 26;
+const uint32_t CAMERA_XCLK_HZ = 20000000;    // XCLK 20 MHz for a sharper demo profile.
+const framesize_t CAMERA_FRAME_SIZE_PSRAM = FRAMESIZE_VGA;     // 640x480: clearer than QVGA, still streamable.
+const framesize_t CAMERA_FRAME_SIZE_NO_PSRAM = FRAMESIZE_QVGA; // 320x240 fallback for no-PSRAM boards.
+const int CAMERA_JPEG_QUALITY_PSRAM = 14;    // Higher number = smaller/lower quality JPEG.
+const int CAMERA_JPEG_QUALITY_NO_PSRAM = 22;
 
 bool mqttEverConnected = false;
 unsigned long lastMqttAttemptMs = 0;
@@ -877,11 +877,13 @@ bool initCamera() {
     if (s->set_framesize) s->set_framesize(s, frameSize);
     if (s->set_quality) s->set_quality(s, jpegQuality);
 
-    // Fixed low-latency camera profile. Keep it simple: no runtime camera tuning yet.
-    if (s->set_brightness) s->set_brightness(s, 0);
-    if (s->set_contrast) s->set_contrast(s, 0);
-    if (s->set_saturation) s->set_saturation(s, -2);
+    // Presentation profile: clearer and brighter than the low-bandwidth QVGA setup.
+    if (s->set_brightness) s->set_brightness(s, 1);
+    if (s->set_contrast) s->set_contrast(s, 1);
+    if (s->set_saturation) s->set_saturation(s, 0);
     if (s->set_whitebal) s->set_whitebal(s, 1);
+    if (s->set_aec2) s->set_aec2(s, 1);
+    if (s->set_ae_level) s->set_ae_level(s, 1);
     if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 1);
     if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
     if (s->set_raw_gma) s->set_raw_gma(s, 1);
